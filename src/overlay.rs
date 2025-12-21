@@ -1,46 +1,50 @@
-/*
 use anyhow::Result;
-use cairo::{Context, Format, ImageSurface};
-use std::fs;
-use std::path::PathBuf;
-use tracing::{debug, error, warn};
+use gtk4::prelude::*;
+use gtk4::{Application, ApplicationWindow, Label, Button, Box as GtkBox, Orientation};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
+
 pub struct OverlayManager {
-    overlay_path: PathBuf,
-    overlay_pid: std::sync::Arc<tokio::sync::RwLock<Option<u32>>>,
+    label_text: Arc<RwLock<String>>,
+    window_created: Arc<RwLock<bool>>,
 }
 
 impl OverlayManager {
     pub fn new() -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
-        let overlay_path = PathBuf::from(home).join(".space-manager").join("overlay.png");
-
         Ok(Self {
-            overlay_path,
-            overlay_pid: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            label_text: Arc::new(RwLock::new(String::new())),
+            window_created: Arc::new(RwLock::new(false)),
         })
     }
 
     /// Show persistent space indicator overlay (1-2-3-[4]-5-6)
-    pub async fn show_spaces_indicator(&self, current: usize, total: usize, _offset_x: i32, _offset_y: i32) {
+    pub async fn show_spaces_indicator(&self, current: usize, total: usize, from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str) {
+        info!("show_spaces_indicator called: current={}, total={}, from={}, offset=({}, {}), overlay_size={}", current, total, from, offset_x, offset_y, overlay_size);
+
         // Generate the indicator text like "1-2-3-[4]-5-6"
         let text = self.generate_indicator_text(current, total);
-        debug!("Spaces indicator: {}", text);
+        info!("Spaces indicator text: {}", text);
 
-        // For now, just use the HUD notification system
-        // TODO: Implement proper persistent overlay with layer-shell or eww widget
-        self.show_hud(text).await;
+        // Update the label text
+        *self.label_text.write().await = text.clone();
+
+        // Check if window is already created
+        let created = *self.window_created.read().await;
+        if !created {
+            info!("Creating new GTK overlay window");
+            self.spawn_gtk_window(from, offset_x, offset_y, overlay_size, change_area_fraction, min_change_area_px, from_area).await;
+            *self.window_created.write().await = true;
+        } else {
+            info!("Overlay window already exists, text will update on next refresh");
+        }
+
+        info!("show_overlay_window completed");
     }
 
     /// Hide the persistent overlay
     pub async fn hide_spaces_indicator(&self) {
-        let pid = self.overlay_pid.read().await;
-        if let Some(pid) = *pid {
-            debug!("Hiding spaces indicator (PID: {})", pid);
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .output();
-        }
-        *self.overlay_pid.write().await = None;
+        *self.window_created.write().await = false;
     }
 
     fn generate_indicator_text(&self, current: usize, total: usize) -> String {
@@ -55,94 +59,211 @@ impl OverlayManager {
         parts.join("-")
     }
 
-    fn render_indicator_image(&self, text: &str) -> Result<()> {
-        // Create directory if it doesn't exist
-        if let Some(parent) = self.overlay_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    async fn spawn_gtk_window(&self, from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str) {
+        let label_text = self.label_text.clone();
+        let from = from.to_string();
+        let overlay_size = overlay_size.to_string();
+        let from_area = from_area.to_string();
 
-        // Create cairo surface and context
-        let surface = match ImageSurface::create(Format::ARgb32, 400, 40) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to create Cairo surface. Cairo libraries may not be installed.");
-                error!("Install with: sudo pacman -S cairo  # or: sudo apt install libcairo2-dev");
-                return Err(anyhow::anyhow!("Cairo error: {}", e));
-            }
-        };
+        // Spawn GTK in a separate thread
+        std::thread::spawn(move || {
+            // Add basic Hyprland rules before creating window
+            let _ = std::process::Command::new("hyprctl")
+                .arg("keyword")
+                .arg("windowrulev2")
+                .arg("float,title:^(Space Manager Overlay)$")
+                .output();
 
-        let cr = Context::new(&surface)?;
+            let _ = std::process::Command::new("hyprctl")
+                .arg("keyword")
+                .arg("windowrulev2")
+                .arg("pin,title:^(Space Manager Overlay)$")
+                .output();
 
-        // Clear background (transparent)
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-        cr.paint()?;
+            info!("Basic Hyprland rules added for overlay");
 
-        // Draw semi-transparent background
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
-        cr.rectangle(0.0, 0.0, 400.0, 40.0);
-        cr.fill()?;
+            let app = Application::builder()
+                .application_id("com.spacermanager.overlay")
+                .build();
 
-        // Draw text
-        cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-        cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-        cr.set_font_size(16.0);
+            let from_clone = from.clone();
+            let overlay_size_clone = overlay_size.clone();
+            let from_area_clone = from_area.clone();
+            app.connect_activate(move |app| {
+                // Get active window geometry NOW, when we're creating the GTK window
+                let (win_x, win_y, win_width, win_height) = if let Some(geom) = get_active_window_geometry() {
+                    info!("Active window geometry: x={}, y={}, w={}, h={}", geom.0, geom.1, geom.2, geom.3);
+                    geom
+                } else {
+                    info!("No active window found, using monitor dimensions");
+                    let (screen_width, screen_height) = get_monitor_size();
+                    (0, 0, screen_width, screen_height)
+                };
 
-        cr.move_to(10.0, 25.0);
-        cr.show_text(text)?;
+                // Calculate overlay width based on overlay_size config
+                let overlay_width = match overlay_size_clone.as_str() {
+                    "change_area_x" => {
+                        // Calculate mouse zone width (same logic as in daemon)
+                        let dimension = if from_area_clone == "left" || from_area_clone == "right" {
+                            win_width
+                        } else {
+                            win_height
+                        };
+                        let zone_fraction = (dimension as f64 * change_area_fraction) as i32;
+                        let zone_size = std::cmp::max(zone_fraction, min_change_area_px);
+                        // Subtract margins
+                        zone_size - (2 * offset_x)
+                    }
+                    "change_area_y" => {
+                        // Use the perpendicular dimension
+                        let dimension = if from_area_clone == "left" || from_area_clone == "right" {
+                            win_height
+                        } else {
+                            win_width
+                        };
+                        let zone_fraction = (dimension as f64 * change_area_fraction) as i32;
+                        let zone_size = std::cmp::max(zone_fraction, min_change_area_px);
+                        // Subtract margins
+                        zone_size - (2 * offset_x)
+                    }
+                    fixed_size => {
+                        // Parse as fixed pixel value
+                        fixed_size.parse::<i32>().unwrap_or(250)
+                    }
+                };
+                let overlay_height = 36;
 
-        // Save to file
-        let mut file = fs::File::create(&self.overlay_path)?;
-        match surface.write_to_png(&mut file) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!("Failed to write PNG. Cairo libraries may not be properly installed.");
-                error!("Install with: sudo pacman -S cairo  # or: sudo apt install libcairo2-dev");
-                Err(anyhow::anyhow!("PNG write error: {}", e))
-            }
-        }
-    }
+                info!("Calculated overlay dimensions: {}x{} (overlay_size={}, offset_x={})", overlay_width, overlay_height, overlay_size_clone, offset_x);
 
-    async fn show_overlay_window(&self, offset_x: i32, offset_y: i32) {
-        // First, hide any existing overlay
-        self.hide_spaces_indicator().await;
+                let window = ApplicationWindow::builder()
+                    .application(app)
+                    .title("Space Manager Overlay")
+                    .default_width(overlay_width)
+                    .default_height(overlay_height)
+                    .decorated(false)
+                    .resizable(false)
+                    .build();
 
-        // Use imv (image viewer) to show the overlay
-        // imv can show images in a borderless window
-        let result = tokio::process::Command::new("imv")
-            .arg("-f")  // Fullscreen/overlay mode
-            .arg("-b")  // Background color
-            .arg("none")
-            .arg(&self.overlay_path)
-            .spawn();
+                // Calculate and apply position after window is mapped
+                let from_clone2 = from_clone.clone();
+                window.connect_map(move |_win| {
+                    // Now calculate position and move the window via Hyprland
+                    let (pos_x, pos_y) = match from_clone2.as_str() {
+                        "bot_left" => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
+                        "bot_right" => (win_x + win_width - overlay_width - offset_x, win_y + win_height - overlay_height - offset_y),
+                        "top_left" => (win_x + offset_x, win_y + offset_y),
+                        "top_right" => (win_x + win_width - overlay_width - offset_x, win_y + offset_y),
+                        _ => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
+                    };
 
-        match result {
-            Ok(child) => {
-                if let Some(pid) = child.id() {
-                    *self.overlay_pid.write().await = Some(pid);
-                    debug!("Overlay window spawned with PID: {}", pid);
+                    info!("Window mapped! Moving to position: ({}, {})", pos_x, pos_y);
 
-                    // Position the window using hyprctl
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    let _ = std::process::Command::new("hyprctl")
-                        .arg("dispatch")
-                        .arg("movewindowpixel")
-                        .arg(format!("exact {} {}", offset_x, offset_y))
-                        .arg("class:imv")
+                    // Move window using hyprctl
+                    std::thread::spawn(move || {
+                        // Small delay to ensure window is fully created
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+
+                        let _ = std::process::Command::new("hyprctl")
+                            .arg("dispatch")
+                            .arg("movewindowpixel")
+                            .arg(format!("exact {} {},title:^Space Manager Overlay$", pos_x, pos_y))
+                            .output();
+
+                        info!("Window moved to ({}, {})", pos_x, pos_y);
+                    });
+                });
+
+                // Create horizontal box to hold label and button
+                let hbox = GtkBox::new(Orientation::Horizontal, 8);
+                hbox.set_margin_start(8);
+                hbox.set_margin_end(8);
+                hbox.set_margin_top(4);
+                hbox.set_margin_bottom(4);
+
+                // Create label
+                let label = Label::builder()
+                    .hexpand(true)
+                    .halign(gtk4::Align::Center)
+                    .build();
+
+                // Create close button
+                let close_button = Button::with_label("Close");
+                close_button.set_width_request(50);
+                close_button.set_height_request(26);
+
+                // Connect close button to kill the daemon
+                close_button.connect_clicked(|_| {
+                    info!("Close button clicked, shutting down space manager");
+                    // Send kill signal to the daemon
+                    let _ = std::process::Command::new("pkill")
+                        .arg("-x")
+                        .arg("space-manager")
                         .output();
-                }
-            }
-            Err(e) => {
-                error!("Failed to spawn overlay window: {}", e);
-                error!("The 'imv' image viewer is not installed or not in PATH.");
-                error!("Install with: sudo pacman -S imv  # or: sudo apt install imv");
-                error!("Alternatively, disable overlay in ~/.space-manager/state.json by setting overlay.enabled to false");
-            }
-        }
+                    std::process::exit(0);
+                });
+
+                hbox.append(&label);
+                hbox.append(&close_button);
+
+                // Add CSS styling
+                let css_provider = gtk4::CssProvider::new();
+                css_provider.load_from_data(
+                    "window {
+                        background-color: rgba(30, 30, 30, 0.95);
+                        border-radius: 6px;
+                    }
+                    label {
+                        color: white;
+                        font-size: 14px;
+                        font-family: monospace;
+                        font-weight: bold;
+                    }
+                    button {
+                        background: linear-gradient(to bottom, #4a90e2, #357abd);
+                        color: #ffffff;
+                        border-radius: 4px;
+                        border: none;
+                        font-size: 11px;
+                        font-weight: normal;
+                        min-width: 50px;
+                        min-height: 26px;
+                        padding: 4px 8px;
+                    }
+                    button:hover {
+                        background: linear-gradient(to bottom, #5aa0f2, #458acd);
+                    }"
+                );
+
+                gtk4::style_context_add_provider_for_display(
+                    &gtk4::prelude::WidgetExt::display(&window),
+                    &css_provider,
+                    gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+
+                window.set_child(Some(&hbox));
+
+                // Update label periodically
+                let label_clone = label.clone();
+                let label_text_clone = label_text.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let text = glib::MainContext::default().block_on(async {
+                        label_text_clone.read().await.clone()
+                    });
+                    label_clone.set_text(&text);
+                    glib::ControlFlow::Continue
+                });
+
+                window.present();
+                info!("GTK overlay window created and shown");
+            });
+
+            info!("Starting GTK application");
+            app.run();
+        });
     }
 
     pub async fn show_hud(&self, text: String) {
         debug!("HUD: {}", text);
-        // Show a temporary notification
         let _ = tokio::process::Command::new("notify-send")
             .arg("-t")
             .arg("1000")
@@ -152,7 +273,7 @@ impl OverlayManager {
     }
 
     pub async fn show_input_box(&self) -> Option<String> {
-        warn!("Input box not yet implemented - use 'spacectl spawn <command>' instead");
+        error!("Input box not yet implemented - use 'spacectl spawn <command>' instead");
         None
     }
 }
@@ -162,4 +283,40 @@ impl Default for OverlayManager {
         Self::new().unwrap()
     }
 }
-*/
+
+fn get_monitor_size() -> (i32, i32) {
+    let output = std::process::Command::new("hyprctl")
+        .arg("monitors")
+        .arg("-j")
+        .output();
+
+    if let Ok(output) = output {
+        if let Ok(monitors) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            if let Some(monitor) = monitors.as_array().and_then(|m| m.first()) {
+                let width = monitor["width"].as_i64().unwrap_or(1920) as i32;
+                let height = monitor["height"].as_i64().unwrap_or(1080) as i32;
+                return (width, height);
+            }
+        }
+    }
+
+    // Default to 1920x1080 if we can't get monitor info
+    (1920, 1080)
+}
+
+fn get_active_window_geometry() -> Option<(i32, i32, i32, i32)> {
+    let output = std::process::Command::new("hyprctl")
+        .arg("activewindow")
+        .arg("-j")
+        .output()
+        .ok()?;
+
+    let window: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+
+    let x = window["at"][0].as_i64()? as i32;
+    let y = window["at"][1].as_i64()? as i32;
+    let width = window["size"][0].as_i64()? as i32;
+    let height = window["size"][1].as_i64()? as i32;
+
+    Some((x, y, width, height))
+}

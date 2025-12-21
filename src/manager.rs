@@ -21,14 +21,35 @@ struct StateFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayConfig {
     pub enabled: bool,
-    pub offset_x: i32,  // pixels from left
-    pub offset_y: i32,  // pixels from bottom
+    #[serde(default = "default_from_area")]
+    pub from_area: String,   // "left", "right", "top", "bottom" - where the mouse change area is
+    #[serde(default = "default_from_overlay")]
+    pub from_overlay: String,   // "bot_left", "bot_right", "top_left", "top_right" - where overlay appears
+    pub offset_x: i32,  // pixels from edge
+    pub offset_y: i32,  // pixels from edge
+    pub change_area_fraction: f64,  // fraction of window width/height (e.g., 0.125 = 1/8)
+    pub min_change_area_px: i32,    // minimum area in pixels
+    #[serde(default = "default_overlay_size")]
+    pub overlay_size: String,  // "change_area_x", "change_area_y", or fixed pixel value like "250"
 }
 
+fn default_from_area() -> String {
+    "left".to_string()
+}
+
+fn default_from_overlay() -> String {
+    "bot_left".to_string()
+}
+
+fn default_overlay_size() -> String {
+    "change_area_x".to_string()
+}
+
+// Keep MouseConfig for backwards compatibility, but it's deprecated
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseConfig {
-    pub change_area_fraction: f64,  // fraction of window width (e.g., 0.125 = 1/8)
-    pub min_change_area_px: i32,    // minimum area in pixels
+    pub change_area_fraction: f64,
+    pub min_change_area_px: i32,
 }
 
 fn default_side_mouse_binds() -> bool {
@@ -38,8 +59,13 @@ fn default_side_mouse_binds() -> bool {
 fn default_overlay_config() -> OverlayConfig {
     OverlayConfig {
         enabled: true,
+        from_area: "left".to_string(),
+        from_overlay: "bot_left".to_string(),
         offset_x: 8,
         offset_y: 26,
+        change_area_fraction: 0.125,
+        min_change_area_px: 250,
+        overlay_size: "change_area_x".to_string(),
     }
 }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use browser_spaces::ipc::{IpcServer, IpcConnection};
 use browser_spaces::manager::SpaceManager;
-//use browser_spaces::overlay::OverlayManager;
+use browser_spaces::overlay::OverlayManager;
 use browser_spaces::process::ProcessLauncher;
 use browser_spaces::types::{Command, ManagedWindow, Response};
 use browser_spaces::input::{InputListener, MouseButton};
@@ -15,7 +15,7 @@ use tracing_subscriber;
 struct Daemon {
     manager: Arc<SpaceManager>,
     launcher: Arc<ProcessLauncher>,
-    //overlay: Arc<OverlayManager>,
+    overlay: Arc<OverlayManager>,
     // Shutdown flag to prevent processing close events during shutdown
     is_shutting_down: Arc<tokio::sync::RwLock<bool>>,
     // Debounce timer for saving current window (only save after 5 seconds of no changes)
@@ -29,7 +29,7 @@ impl Daemon {
         Ok(Self {
             manager: Arc::new(SpaceManager::new()),
             launcher: Arc::new(ProcessLauncher::new()),
-            //overlay: Arc::new(OverlayManager::new()?),
+            overlay: Arc::new(OverlayManager::new()?),
             is_shutting_down: Arc::new(tokio::sync::RwLock::new(false)),
             save_current_timer: Arc::new(tokio::sync::RwLock::new(None)),
             current_workspace: Arc::new(tokio::sync::RwLock::new(None)),
@@ -81,10 +81,10 @@ impl Daemon {
         false
     }
 
-    /// Check if mouse is within allowed distance from left edge of active window
+    /// Check if mouse is within allowed distance from configured edge of active window
     async fn check_mouse_position(&self) -> Result<bool> {
-        // Get mouse config from manager
-        let mouse_config = self.manager.get_mouse_config().await;
+        // Get overlay config from manager (which now contains the mouse area config)
+        let overlay_config = self.manager.get_overlay_config().await;
 
         // Get cursor position
         let cursor_output = std::process::Command::new("hyprctl")
@@ -94,6 +94,7 @@ impl Daemon {
 
         let cursor: serde_json::Value = serde_json::from_slice(&cursor_output.stdout)?;
         let mouse_x = cursor["x"].as_f64().unwrap_or(0.0) as i32;
+        let mouse_y = cursor["y"].as_f64().unwrap_or(0.0) as i32;
 
         // Get active window
         let active_output = std::process::Command::new("hyprctl")
@@ -103,25 +104,56 @@ impl Daemon {
 
         let window: serde_json::Value = serde_json::from_slice(&active_output.stdout)?;
         let window_x = window["at"][0].as_i64().unwrap_or(0) as i32;
+        let window_y = window["at"][1].as_i64().unwrap_or(0) as i32;
         let window_width = window["size"][0].as_i64().unwrap_or(0) as i32;
+        let window_height = window["size"][1].as_i64().unwrap_or(0) as i32;
 
-        if window_width == 0 {
+        if window_width == 0 || window_height == 0 {
             debug!("No active window found");
             return Ok(false);
         }
 
-        // Calculate distance from left edge of window
-        let distance_from_left = mouse_x - window_x;
+        // Check mouse position based on from_area config
+        let in_change_area = match overlay_config.from_area.as_str() {
+            "left" => {
+                let distance_from_left = mouse_x - window_x;
+                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
+                debug!("Mouse check (left): distance={}, max={}", distance_from_left, max_allowed);
+                distance_from_left >= 0 && distance_from_left <= max_allowed
+            }
+            "right" => {
+                let distance_from_right = (window_x + window_width) - mouse_x;
+                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
+                debug!("Mouse check (right): distance={}, max={}", distance_from_right, max_allowed);
+                distance_from_right >= 0 && distance_from_right <= max_allowed
+            }
+            "top" => {
+                let distance_from_top = mouse_y - window_y;
+                let max_by_fraction = (window_height as f64 * overlay_config.change_area_fraction) as i32;
+                let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
+                debug!("Mouse check (top): distance={}, max={}", distance_from_top, max_allowed);
+                distance_from_top >= 0 && distance_from_top <= max_allowed
+            }
+            "bottom" => {
+                let distance_from_bottom = (window_y + window_height) - mouse_y;
+                let max_by_fraction = (window_height as f64 * overlay_config.change_area_fraction) as i32;
+                let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
+                debug!("Mouse check (bottom): distance={}, max={}", distance_from_bottom, max_allowed);
+                distance_from_bottom >= 0 && distance_from_bottom <= max_allowed
+            }
+            _ => {
+                // Default to left for backward compatibility
+                let distance_from_left = mouse_x - window_x;
+                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
+                debug!("Mouse check (default left): distance={}, max={}", distance_from_left, max_allowed);
+                distance_from_left >= 0 && distance_from_left <= max_allowed
+            }
+        };
 
-        // Calculate max allowed distance (use the LARGER of the two - more permissive)
-        let max_by_fraction = (window_width as f64 * mouse_config.change_area_fraction) as i32;
-        let max_allowed = std::cmp::max(max_by_fraction, mouse_config.min_change_area_px);
-
-        debug!("Mouse position check: distance_from_left={}, max_allowed={} (fraction={}, pixels={})",
-               distance_from_left, max_allowed, max_by_fraction, mouse_config.min_change_area_px);
-
-        // Check if mouse is within allowed distance from left edge
-        Ok(distance_from_left >= 0 && distance_from_left <= max_allowed)
+        Ok(in_change_area)
     }
 
     async fn handle_command(&self, cmd: Command) -> Response {
@@ -189,7 +221,7 @@ impl Daemon {
                     }
 
                     // Update overlay
-                    //self.update_overlay().await;
+                    self.update_overlay().await;
 
                     // Schedule saving current window after 5 seconds
                     self.schedule_save_current().await;
@@ -270,7 +302,7 @@ impl Daemon {
                     }
 
                     // Update overlay
-                    //self.update_overlay().await;
+                    self.update_overlay().await;
 
                     // Schedule saving current window after 5 seconds
                     self.schedule_save_current().await;
@@ -404,19 +436,41 @@ impl Daemon {
         // THEN: Show the target window by moving it to the target workspace
         info!("Showing window: {}", target_address);
 
-        // Use movetoworkspacesilent to avoid focusing/moving cursor
+        // Save current cursor position
+        let cursor_pos = std::process::Command::new("hyprctl")
+            .arg("cursorpos")
+            .arg("-j")
+            .output()
+            .ok()
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .and_then(|cursor| {
+                let x = cursor["x"].as_f64()?;
+                let y = cursor["y"].as_f64()?;
+                Some((x as i32, y as i32))
+            });
+
+        // Move to the target workspace (not silent, so it shows)
         let output = std::process::Command::new("hyprctl")
             .arg("dispatch")
-            .arg("movetoworkspacesilent")
+            .arg("movetoworkspace")
             .arg(format!("{},address:{}", target_workspace, target_address))
             .output()?;
 
         if !output.status.success() {
-            error!("Failed to show window: {}", String::from_utf8_lossy(&output.stderr));
+            error!("Failed to move window to workspace: {}", String::from_utf8_lossy(&output.stderr));
         }
 
         // Small delay after showing
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Restore cursor position
+        if let Some((x, y)) = cursor_pos {
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("movecursor")
+                .arg(format!("{} {}", x, y))
+                .output();
+        }
         // Update tracked workspace in memory
         *self.current_workspace.write().await = Some(target_workspace);
         info!("Tracked current workspace: {}", target_workspace);
@@ -584,24 +638,51 @@ impl Daemon {
 
     /// Update the persistent overlay if enabled
     async fn update_overlay(&self) {
+        info!("update_overlay called");
         let overlay_config = self.manager.get_overlay_config().await;
+        info!("Overlay config: enabled={}, from_area={}, from_overlay={}",
+              overlay_config.enabled, overlay_config.from_area, overlay_config.from_overlay);
+
         if !overlay_config.enabled {
+            info!("Overlay disabled in config");
             return;
         }
 
-        /*
         let current_index = self.manager.get_current_index().await;
         let total = self.manager.window_count().await;
 
+        info!("Updating overlay: {} / {}", current_index + 1, total);
+
         if total > 0 {
-            self.overlay.show_spaces_indicator(
-                current_index,
-                total,
-                overlay_config.offset_x,
-                overlay_config.offset_y
-            ).await;
+            // Spawn overlay update in background to avoid blocking
+            let overlay = self.overlay.clone();
+            let from = overlay_config.from_overlay.clone();
+            let offset_x = overlay_config.offset_x;
+            let offset_y = overlay_config.offset_y;
+            let overlay_size = overlay_config.overlay_size.clone();
+            let change_area_fraction = overlay_config.change_area_fraction;
+            let min_change_area_px = overlay_config.min_change_area_px;
+            let from_area = overlay_config.from_area.clone();
+
+            info!("Spawning overlay task");
+            tokio::spawn(async move {
+                info!("Overlay task started");
+                overlay.show_spaces_indicator(
+                    current_index,
+                    total,
+                    &from,
+                    offset_x,
+                    offset_y,
+                    &overlay_size,
+                    change_area_fraction,
+                    min_change_area_px,
+                    &from_area
+                ).await;
+                info!("Overlay task finished");
+            });
+        } else {
+            info!("No windows to show overlay for");
         }
-         */
     }
 
     async fn handle_mouse_button(&self, button: MouseButton) {
