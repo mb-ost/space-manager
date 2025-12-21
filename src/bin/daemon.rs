@@ -189,7 +189,7 @@ impl Daemon {
                     }
 
                     // Update overlay
-                    self.update_overlay().await;
+                    //self.update_overlay().await;
 
                     // Schedule saving current window after 5 seconds
                     self.schedule_save_current().await;
@@ -270,7 +270,7 @@ impl Daemon {
                     }
 
                     // Update overlay
-                    self.update_overlay().await;
+                    //self.update_overlay().await;
 
                     // Schedule saving current window after 5 seconds
                     self.schedule_save_current().await;
@@ -404,9 +404,10 @@ impl Daemon {
         // THEN: Show the target window by moving it to the target workspace
         info!("Showing window: {}", target_address);
 
+        // Use movetoworkspacesilent to avoid focusing/moving cursor
         let output = std::process::Command::new("hyprctl")
             .arg("dispatch")
-            .arg("movetoworkspace")
+            .arg("movetoworkspacesilent")
             .arg(format!("{},address:{}", target_workspace, target_address))
             .output()?;
 
@@ -414,17 +415,8 @@ impl Daemon {
             error!("Failed to show window: {}", String::from_utf8_lossy(&output.stderr));
         }
 
-        // Longer delay after showing
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Focus it
-        info!("Focusing window: {}", target_address);
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("focuswindow")
-            .arg(format!("address:{}", target_address))
-            .output();
-
+        // Small delay after showing
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         // Update tracked workspace in memory
         *self.current_workspace.write().await = Some(target_workspace);
         info!("Tracked current workspace: {}", target_workspace);

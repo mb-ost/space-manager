@@ -1,9 +1,9 @@
+/*
 use anyhow::Result;
 use cairo::{Context, Format, ImageSurface};
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, error, warn};
-/*
 pub struct OverlayManager {
     overlay_path: PathBuf,
     overlay_pid: std::sync::Arc<tokio::sync::RwLock<Option<u32>>>,
