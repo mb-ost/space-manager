@@ -8,6 +8,8 @@ use tracing::{debug, error, info};
 pub struct OverlayManager {
     label_text: Arc<RwLock<String>>,
     window_created: Arc<RwLock<bool>>,
+    overlay_visible: Arc<RwLock<bool>>,
+    saved_position: Arc<RwLock<Option<(i32, i32)>>>,
 }
 
 impl OverlayManager {
@@ -15,6 +17,8 @@ impl OverlayManager {
         Ok(Self {
             label_text: Arc::new(RwLock::new(String::new())),
             window_created: Arc::new(RwLock::new(false)),
+            overlay_visible: Arc::new(RwLock::new(true)),
+            saved_position: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -43,8 +47,89 @@ impl OverlayManager {
     }
 
     /// Hide the persistent overlay
+    pub async fn hide_overlay(&self) {
+        info!("Hiding overlay window");
+
+        // Save current position before hiding
+        if let Some((x, y)) = get_overlay_window_position() {
+            *self.saved_position.write().await = Some((x, y));
+            info!("Saved overlay position: ({}, {})", x, y);
+        }
+
+        // Unpin the overlay so it's no longer visible on all workspaces
+        let _ = std::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg("pin")
+            .arg("title:^Space Manager Overlay$")
+            .output();
+
+        info!("Unpinned overlay");
+
+        // Move to special workspace where we hide invisible tabs
+        let _ = std::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg("movetoworkspacesilent")
+            .arg("special:spaces,title:^Space Manager Overlay$")
+            .output();
+
+        info!("Moved overlay to special:spaces");
+
+        *self.overlay_visible.write().await = false;
+    }
+
+    /// Show the persistent overlay (restore from hidden state)
+    pub async fn show_overlay(&self) {
+        info!("Showing overlay window");
+
+        // Get the workspace where space manager windows are visible
+        // We'll move it to the active workspace first
+        let active_workspace = get_active_workspace().unwrap_or(1);
+
+        // Move overlay from special workspace to active workspace
+        let _ = std::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg("movetoworkspacesilent")
+            .arg(format!("{},title:^Space Manager Overlay$", active_workspace))
+            .output();
+
+        info!("Moved overlay to workspace {}", active_workspace);
+
+        // Small delay to ensure move completes
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        // Restore saved position if available
+        if let Some((x, y)) = *self.saved_position.read().await {
+            info!("Restoring overlay position: ({}, {})", x, y);
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("movewindowpixel")
+                .arg(format!("exact {} {},title:^Space Manager Overlay$", x, y))
+                .output();
+        }
+
+        // Small delay before pinning
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        // Pin the overlay so it shows on all workspaces
+        let _ = std::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg("pin")
+            .arg("title:^Space Manager Overlay$")
+            .output();
+
+        info!("Pinned overlay");
+
+        *self.overlay_visible.write().await = true;
+    }
+
+    /// Check if overlay is currently visible
+    pub async fn is_overlay_visible(&self) -> bool {
+        *self.overlay_visible.read().await
+    }
+
+    /// Hide the persistent overlay (legacy method - kept for compatibility)
     pub async fn hide_spaces_indicator(&self) {
-        *self.window_created.write().await = false;
+        self.hide_overlay().await;
     }
 
     fn generate_indicator_text(&self, current: usize, total: usize) -> String {
@@ -67,20 +152,15 @@ impl OverlayManager {
 
         // Spawn GTK in a separate thread
         std::thread::spawn(move || {
-            // Add basic Hyprland rules before creating window
+            // We don't set any window rules here - we'll control pin/unpin dynamically
+            // Only set float rule so overlay doesn't tile
             let _ = std::process::Command::new("hyprctl")
                 .arg("keyword")
                 .arg("windowrulev2")
                 .arg("float,title:^(Space Manager Overlay)$")
                 .output();
 
-            let _ = std::process::Command::new("hyprctl")
-                .arg("keyword")
-                .arg("windowrulev2")
-                .arg("pin,title:^(Space Manager Overlay)$")
-                .output();
-
-            info!("Basic Hyprland rules added for overlay");
+            info!("Float rule added for overlay");
 
             let app = Application::builder()
                 .application_id("com.spacermanager.overlay")
@@ -163,6 +243,7 @@ impl OverlayManager {
                         // Small delay to ensure window is fully created
                         std::thread::sleep(std::time::Duration::from_millis(50));
 
+                        // Position the window
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("movewindowpixel")
@@ -170,6 +251,18 @@ impl OverlayManager {
                             .output();
 
                         info!("Window moved to ({}, {})", pos_x, pos_y);
+
+                        // Small delay before pinning
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+
+                        // Pin the overlay so it appears on all workspaces
+                        let _ = std::process::Command::new("hyprctl")
+                            .arg("dispatch")
+                            .arg("pin")
+                            .arg("title:^Space Manager Overlay$")
+                            .output();
+
+                        info!("Overlay pinned");
                     });
                 });
 
@@ -320,3 +413,39 @@ fn get_active_window_geometry() -> Option<(i32, i32, i32, i32)> {
 
     Some((x, y, width, height))
 }
+
+fn get_active_workspace() -> Option<i32> {
+    let output = std::process::Command::new("hyprctl")
+        .arg("activeworkspace")
+        .arg("-j")
+        .output()
+        .ok()?;
+
+    let workspace: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let id = workspace["id"].as_i64()? as i32;
+
+    Some(id)
+}
+
+fn get_overlay_window_position() -> Option<(i32, i32)> {
+    let output = std::process::Command::new("hyprctl")
+        .arg("clients")
+        .arg("-j")
+        .output()
+        .ok()?;
+
+    let clients: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+
+    for client in clients.as_array()? {
+        if let Some(title) = client["title"].as_str() {
+            if title == "Space Manager Overlay" {
+                let x = client["at"][0].as_i64()? as i32;
+                let y = client["at"][1].as_i64()? as i32;
+                return Some((x, y));
+            }
+        }
+    }
+
+    None
+}
+

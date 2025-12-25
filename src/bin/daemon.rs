@@ -646,6 +646,72 @@ impl Daemon {
         }
     }
 
+    /// Get all currently visible workspaces across all monitors
+    fn get_visible_workspaces(&self) -> Vec<i32> {
+        let output = match std::process::Command::new("hyprctl")
+            .arg("monitors")
+            .arg("-j")
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                error!("Failed to get monitors: {}", e);
+                return vec![];
+            }
+        };
+
+        if let Ok(monitors) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            if let Some(monitors_array) = monitors.as_array() {
+                return monitors_array
+                    .iter()
+                    .filter_map(|monitor| {
+                        monitor["activeWorkspace"]["id"].as_i64().map(|id| id as i32)
+                    })
+                    .collect();
+            }
+        }
+
+        vec![]
+    }
+
+    async fn handle_workspace_change(&self, workspace_id: i32) {
+        info!("Workspace changed to: {}", workspace_id);
+
+        // Get all visible workspaces across all monitors
+        let visible_workspaces = self.get_visible_workspaces();
+        info!("Currently visible workspaces: {:?}", visible_workspaces);
+
+        // Check if any of our tracked windows are visible on any visible workspace
+        let all_windows = self.manager.get_windows().await;
+        let mut window_visible = false;
+
+        for window in all_windows.iter() {
+            if window.is_open() {
+                if let Some(win_workspace) = self.get_window_workspace(&window.address) {
+                    // Check if window is on any currently visible workspace
+                    if visible_workspaces.contains(&win_workspace) {
+                        window_visible = true;
+                        info!("Space manager window is visible on workspace {}", win_workspace);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Show or hide overlay based on window visibility
+        if window_visible {
+            if !self.overlay.is_overlay_visible().await {
+                info!("Showing overlay (window became visible)");
+                self.overlay.show_overlay().await;
+            }
+        } else {
+            if self.overlay.is_overlay_visible().await {
+                info!("Hiding overlay (window not visible on any visible workspace)");
+                self.overlay.hide_overlay().await;
+            }
+        }
+    }
+
     /// Update the persistent overlay if enabled
     async fn update_overlay(&self) {
         info!("update_overlay called");
@@ -770,6 +836,7 @@ impl Daemon {
         let daemon = self.clone();
         let daemon2 = self.clone();
         let daemon3 = self.clone();
+        let daemon4 = self.clone();
 
         std::thread::spawn(move || {
             let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
@@ -811,6 +878,19 @@ impl Daemon {
                     let daemon = daemon.clone();
                     runtime.spawn(async move {
                         daemon.handle_window_moved(address).await;
+                    });
+                }
+            });
+
+            listener.add_workspace_changed_handler({
+                let daemon = daemon4.clone();
+                let runtime = runtime.clone();
+                move |data| {
+                    // data is WorkspaceEventData which has an 'id' field
+                    let workspace_id = data.id;
+                    let daemon = daemon.clone();
+                    runtime.spawn(async move {
+                        daemon.handle_workspace_change(workspace_id).await;
                     });
                 }
             });
