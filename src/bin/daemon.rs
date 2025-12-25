@@ -22,6 +22,8 @@ struct Daemon {
     save_current_timer: Arc<tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>>,
     // In-memory tracking of current window's workspace (NOT persisted to state.json)
     current_workspace: Arc<tokio::sync::RwLock<Option<i32>>>,
+    // Mutex to prevent overlapping visibility updates during rapid tab switching
+    visibility_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Daemon {
@@ -33,6 +35,7 @@ impl Daemon {
             is_shutting_down: Arc::new(tokio::sync::RwLock::new(false)),
             save_current_timer: Arc::new(tokio::sync::RwLock::new(None)),
             current_workspace: Arc::new(tokio::sync::RwLock::new(None)),
+            visibility_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -383,7 +386,33 @@ impl Daemon {
 
     /// Update visibility: show target window, hide all others
     async fn update_visibility(&self, target_address: &str) -> Result<()> {
+        // Acquire lock to prevent overlapping visibility updates during rapid tab switching
+        let _lock = self.visibility_lock.lock().await;
+
         info!("Updating visibility: showing {}", target_address);
+
+        // STEP 0: Temporarily disable focus-follows-mouse to prevent mouse movement from changing focus
+        // Get current settings first
+        let focus_follows_output = std::process::Command::new("hyprctl")
+            .arg("getoption")
+            .arg("input:follow_mouse")
+            .arg("-j")
+            .output()
+            .ok();
+
+        let original_follow_mouse = focus_follows_output
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .and_then(|json| json["int"].as_i64())
+            .unwrap_or(1); // Default to 1 if we can't read it
+
+        info!("Original follow_mouse setting: {}", original_follow_mouse);
+
+        // Disable focus-follows-mouse temporarily (0 = disabled)
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("input:follow_mouse")
+            .arg("0")
+            .output();
 
         // Get all tracked windows
         let all_windows = self.manager.get_windows().await;
@@ -414,9 +443,20 @@ impl Daemon {
 
         info!("Target workspace: {}", target_workspace);
 
-        // FIRST: Hide all other tracked windows BEFORE showing target
+        // STEP 1: Move target window to the workspace SILENTLY (no focus, no mouse movement)
+        info!("Moving target window to workspace silently: {}", target_address);
+        let _ = std::process::Command::new("hyprctl")
+            .arg("dispatch")
+            .arg("movetoworkspacesilent")
+            .arg(format!("{},address:{}", target_workspace, target_address))
+            .output()?;
+
+        // Small delay to ensure move completes
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+        // STEP 2: Hide all other tracked windows (move to special workspace)
         for win in all_windows.iter() {
-            if win.address != target_address {
+            if win.address != target_address && win.is_open() {
                 info!("Hiding window: {}", win.address);
                 let output = std::process::Command::new("hyprctl")
                     .arg("dispatch")
@@ -430,47 +470,17 @@ impl Daemon {
             }
         }
 
-        // Small delay to ensure hides are processed
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Small delay to ensure all operations complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
-        // THEN: Show the target window by moving it to the target workspace
-        info!("Showing window: {}", target_address);
+        // STEP 3: Restore focus-follows-mouse to original setting
+        info!("Restoring follow_mouse to: {}", original_follow_mouse);
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("input:follow_mouse")
+            .arg(format!("{}", original_follow_mouse))
+            .output();
 
-        // Save current cursor position
-        let cursor_pos = std::process::Command::new("hyprctl")
-            .arg("cursorpos")
-            .arg("-j")
-            .output()
-            .ok()
-            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-            .and_then(|cursor| {
-                let x = cursor["x"].as_f64()?;
-                let y = cursor["y"].as_f64()?;
-                Some((x as i32, y as i32))
-            });
-
-        // Move to the target workspace (not silent, so it shows)
-        let output = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("movetoworkspace")
-            .arg(format!("{},address:{}", target_workspace, target_address))
-            .output()?;
-
-        if !output.status.success() {
-            error!("Failed to move window to workspace: {}", String::from_utf8_lossy(&output.stderr));
-        }
-
-        // Small delay after showing
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // Restore cursor position
-        if let Some((x, y)) = cursor_pos {
-            let _ = std::process::Command::new("hyprctl")
-                .arg("dispatch")
-                .arg("movecursor")
-                .arg(format!("{} {}", x, y))
-                .output();
-        }
         // Update tracked workspace in memory
         *self.current_workspace.write().await = Some(target_workspace);
         info!("Tracked current workspace: {}", target_workspace);
