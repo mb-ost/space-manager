@@ -355,6 +355,26 @@ impl Daemon {
                     }
                 }
             }
+            Command::ReloadConfig => {
+                match self.manager.reload_config().await {
+                    Ok(_) => {
+                        info!("Configuration reloaded successfully - updating overlay");
+
+                        // Simply update the overlay - it will detect config changes and recreate if needed
+                        self.update_overlay().await;
+
+                        // Wait a bit for the overlay to be recreated if needed
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to reload config: {}", e);
+                        Response::Error(format!("Failed to reload config: {}", e))
+                    }
+                }
+            }
         }
     }
 
@@ -730,6 +750,11 @@ impl Daemon {
         info!("Updating overlay: {} / {}", current_index + 1, total);
 
         if total > 0 {
+            // Get the current tracked window address
+            let tracked_window_address = self.manager.current_window().await
+                .filter(|w| w.is_open())
+                .map(|w| w.address.clone());
+
             // Spawn overlay update in background to avoid blocking
             let overlay = self.overlay.clone();
             let from = overlay_config.from_overlay.clone();
@@ -752,7 +777,8 @@ impl Daemon {
                     &overlay_size,
                     change_area_fraction,
                     min_change_area_px,
-                    &from_area
+                    &from_area,
+                    tracked_window_address.as_deref(),
                 ).await;
                 info!("Overlay task finished");
             });

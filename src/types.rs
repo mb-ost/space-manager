@@ -63,6 +63,7 @@ pub enum Command {
     Spawn(String),
     List,
     Cleanup,  // Close all windows in special:spaces
+    ReloadConfig,  // Reload configuration from state.json
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

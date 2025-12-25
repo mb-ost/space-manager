@@ -194,6 +194,37 @@ impl SpaceManager {
         self.mouse_config.read().await.clone()
     }
 
+    /// Reload configuration from state.json without restarting
+    pub async fn reload_config(&self) -> Result<()> {
+        info!("Reloading configuration from state.json");
+
+        if !self.state_file.exists() {
+            return Err(anyhow::anyhow!("State file not found"));
+        }
+
+        let content = tokio::fs::read_to_string(&self.state_file).await?;
+        let state: StateFile = serde_json::from_str(&content)?;
+
+        // Reload side_mouse_binds setting
+        let mut side_mouse_binds = self.side_mouse_binds.write().await;
+        *side_mouse_binds = state.side_mouse_binds;
+        info!("Reloaded side_mouse_binds setting: {}", state.side_mouse_binds);
+
+        // Reload overlay config
+        let mut overlay_config = self.overlay_config.write().await;
+        *overlay_config = state.overlay;
+        info!("Reloaded overlay config: enabled={}, offset=({}, {})",
+              overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
+
+        // Reload mouse config
+        let mut mouse_config = self.mouse_config.write().await;
+        *mouse_config = state.mouse;
+        info!("Reloaded mouse config: fraction={}, min_px={}",
+              mouse_config.change_area_fraction, mouse_config.min_change_area_px);
+
+        Ok(())
+    }
+
     pub async fn add_window(&self, window: ManagedWindow) {
         let mut windows = self.windows.write().await;
         windows.push(window);
