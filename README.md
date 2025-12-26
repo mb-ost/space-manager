@@ -397,8 +397,6 @@ Then spawn with:
 ## Known Limitations
 
 - Window matching relies on process PID and window class, which may not work for all applications
-- Multi-monitor setups work but overlay shows on workspace where managed window is located
-- Some applications may not support multiple isolated instances
 - GTK4 required for overlay (no fallback UI currently)
 
 ## Contributing
