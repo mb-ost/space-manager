@@ -12,6 +12,12 @@ struct WindowState {
     current: Option<String>,  // ID of the current window
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandTemplate {
+    pub name: String,
+    pub command: String,  // Can contain {{variable}} placeholders
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ConfigFile {
     #[serde(default = "default_side_mouse_binds")]
@@ -20,6 +26,8 @@ struct ConfigFile {
     overlay: OverlayConfig,
     #[serde(default = "default_mouse_config")]
     mouse: MouseConfig,
+    #[serde(default)]
+    templates: Vec<CommandTemplate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +96,7 @@ pub struct SpaceManager {
     side_mouse_binds: Arc<RwLock<bool>>,
     overlay_config: Arc<RwLock<OverlayConfig>>,
     mouse_config: Arc<RwLock<MouseConfig>>,
+    templates: Arc<RwLock<Vec<CommandTemplate>>>,
 }
 
 impl SpaceManager {
@@ -102,6 +111,7 @@ impl SpaceManager {
             side_mouse_binds: Arc::new(RwLock::new(true)),
             overlay_config: Arc::new(RwLock::new(default_overlay_config())),
             mouse_config: Arc::new(RwLock::new(default_mouse_config())),
+            templates: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -138,6 +148,11 @@ impl SpaceManager {
             *mouse_config = config.mouse;
             info!("Loaded mouse config: fraction={}, min_px={}",
                   mouse_config.change_area_fraction, mouse_config.min_change_area_px);
+
+            // Load templates
+            let mut templates = self.templates.write().await;
+            *templates = config.templates;
+            info!("Loaded {} command templates", templates.len());
         } else {
             info!("No config file found at {:?}, using defaults", self.config_file);
         }
@@ -207,11 +222,13 @@ impl SpaceManager {
         let side_mouse_binds = *self.side_mouse_binds.read().await;
         let overlay_config = self.overlay_config.read().await.clone();
         let mouse_config = self.mouse_config.read().await.clone();
+        let templates = self.templates.read().await.clone();
 
         let config = ConfigFile {
             side_mouse_binds,
             overlay: overlay_config,
             mouse: mouse_config,
+            templates,
         };
 
         let content = serde_json::to_string_pretty(&config)?;
@@ -231,6 +248,24 @@ impl SpaceManager {
 
     pub async fn get_mouse_config(&self) -> MouseConfig {
         self.mouse_config.read().await.clone()
+    }
+
+    pub async fn get_templates(&self) -> Vec<CommandTemplate> {
+        self.templates.read().await.clone()
+    }
+
+    pub async fn add_template(&self, template: CommandTemplate) -> Result<()> {
+        let mut templates = self.templates.write().await;
+        templates.push(template);
+        drop(templates);
+        self.save_config().await
+    }
+
+    pub async fn remove_template(&self, name: &str) -> Result<()> {
+        let mut templates = self.templates.write().await;
+        templates.retain(|t| t.name != name);
+        drop(templates);
+        self.save_config().await
     }
 
     /// Reload configuration from config.json without restarting
@@ -261,6 +296,11 @@ impl SpaceManager {
         info!("Reloaded mouse config: fraction={}, min_px={}",
               mouse_config.change_area_fraction, mouse_config.min_change_area_px);
 
+        // Reload templates
+        let mut templates = self.templates.write().await;
+        *templates = config.templates;
+        info!("Reloaded {} command templates", templates.len());
+
         Ok(())
     }
 
@@ -273,6 +313,21 @@ impl SpaceManager {
         *current = windows.len() - 1;
     }
 
+    /// Insert a window at a specific index
+    pub async fn insert_window_at(&self, index: usize, window: ManagedWindow) {
+        let mut windows = self.windows.write().await;
+        let insert_pos = index.min(windows.len());
+        windows.insert(insert_pos, window);
+
+        // Adjust current index if we inserted before or at the current position
+        let mut current = self.current_index.write().await;
+        if insert_pos <= *current && !windows.is_empty() {
+            // If we inserted at or before current position, increment current to maintain the same window
+            *current += 1;
+        }
+        // Note: We don't set current to the new window - that should happen when we actually switch to it
+    }
+
     /// Remove a window entirely by address
     pub async fn remove_window_by_address(&self, address: &str) -> Option<usize> {
         let mut windows = self.windows.write().await;
@@ -283,9 +338,14 @@ impl SpaceManager {
             let mut current = self.current_index.write().await;
             if windows.is_empty() {
                 *current = 0;
+            } else if pos < *current {
+                // Removed a window before the current one, decrement index
+                *current -= 1;
             } else if *current >= windows.len() {
+                // Current index is past the end, wrap to last window
                 *current = windows.len() - 1;
             }
+            // If pos == *current, the index stays the same (now points to the next window)
 
             Some(pos)
         } else {
@@ -354,6 +414,18 @@ impl SpaceManager {
         Some(windows[*current].clone())
     }
 
+    /// Switch to a window by its address
+    pub async fn switch_to_address(&self, address: &str) -> Option<ManagedWindow> {
+        let windows = self.windows.read().await;
+        if let Some(index) = windows.iter().position(|w| w.address == address) {
+            let mut current = self.current_index.write().await;
+            *current = index;
+            Some(windows[index].clone())
+        } else {
+            None
+        }
+    }
+
     pub async fn current_window(&self) -> Option<ManagedWindow> {
         let windows = self.windows.read().await;
         let current = self.current_index.read().await;
@@ -380,13 +452,13 @@ impl SpaceManager {
     /// Swap two windows by their indices
     pub async fn swap_windows(&self, index1: usize, index2: usize) -> Result<()> {
         let mut windows = self.windows.write().await;
-        
+
         if index1 >= windows.len() || index2 >= windows.len() {
             return Err(anyhow::anyhow!("Invalid window indices"));
         }
-        
+
         windows.swap(index1, index2);
-        
+
         // Update current index if it was one of the swapped windows
         let mut current = self.current_index.write().await;
         if *current == index1 {
@@ -394,28 +466,29 @@ impl SpaceManager {
         } else if *current == index2 {
             *current = index1;
         }
-        
+
         Ok(())
     }
 
     /// Set custom icon for a window
     pub async fn set_window_icon(&self, index: usize, icon: String) -> Result<()> {
         let mut windows = self.windows.write().await;
-        
+
         if index >= windows.len() {
             return Err(anyhow::anyhow!("Invalid window index"));
         }
-        
+
         windows[index].custom_icon = if icon.is_empty() {
             None
         } else {
             Some(icon)
         };
-        
+
         Ok(())
     }
 
-    /// Find closed window by command and mark as open
+
+    /// Find closed window by command and mark as open (fallback for old spawns without ID)
     pub async fn open_window_by_command(&self, command: &str, address: String, class: String, title: String, pid: Option<u32>) -> bool {
         let mut windows = self.windows.write().await;
         if let Some(window) = windows.iter_mut().find(|w| {

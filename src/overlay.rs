@@ -581,6 +581,7 @@ impl OverlayManager {
 
                 // Create popover menu
                 let menu = gtk4::gio::Menu::new();
+                menu.append(Some("New Space..."), Some("app.new_space"));
                 menu.append(Some("Settings"), Some("app.settings"));
 
                 let popover = gtk4::PopoverMenu::builder()
@@ -589,6 +590,14 @@ impl OverlayManager {
                     .build();
 
                 menu_button.set_popover(Some(&popover));
+
+                // Add "New Space" action
+                let new_space_action = gtk4::gio::SimpleAction::new("new_space", None);
+                new_space_action.connect_activate(move |_, _| {
+                    info!("New Space clicked, opening window");
+                    show_new_space_window();
+                });
+                app.add_action(&new_space_action);
 
                 // Add settings action
                 let app_clone = app.clone();
@@ -599,17 +608,21 @@ impl OverlayManager {
                 });
                 app.add_action(&settings_action);
 
+
                 // Create horizontal box for space buttons
                 let spaces_box = GtkBox::new(Orientation::Horizontal, 4);
                 spaces_box.set_halign(gtk4::Align::Center);
 
                 // Wrap the spaces box in a scrolled window for horizontal scrolling
                 let scrolled_window = gtk4::ScrolledWindow::builder()
-                    .hscrollbar_policy(gtk4::PolicyType::Automatic)
+                    .hscrollbar_policy(gtk4::PolicyType::External)  // External means we handle scrolling, no space reserved
                     .vscrollbar_policy(gtk4::PolicyType::Never)
                     .hexpand(true)
-                    .propagate_natural_width(true)
+                    .propagate_natural_width(false)  // Don't propagate width - allow scrolling
+                    .kinetic_scrolling(true)  // Enable smooth kinetic scrolling
+                    .has_frame(false)  // No frame
                     .build();
+                scrolled_window.set_overlay_scrolling(true);  // Overlay scrolling doesn't take layout space
                 scrolled_window.set_child(Some(&spaces_box));
 
                 // We need to get the label text synchronously, so we'll use a blocking approach
@@ -867,6 +880,32 @@ impl OverlayManager {
                     spaces_box.append(&space_button);
                 }
 
+                // Auto-scroll to current tab on initial creation
+                if let Some(current_index) = parts.iter().position(|p| p.contains('[')) {
+                    let scrolled_window_for_init_scroll = scrolled_window.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+                        let adj = scrolled_window_for_init_scroll.hadjustment();
+                        let button_width = 32.0; // Approximate button width including margins
+                        let viewport_width = adj.page_size();
+
+                        // Calculate position to show current button with 1 button context before it if possible
+                        let ideal_start_index = if current_index > 0 {
+                            current_index - 1
+                        } else {
+                            0
+                        };
+
+                        let ideal_start = ideal_start_index as f64 * button_width;
+
+                        // Clamp to valid range
+                        let max_scroll = (total_spaces as f64 * button_width - viewport_width).max(0.0);
+                        let target_pos = ideal_start.min(max_scroll).max(0.0);
+
+                        adj.set_value(target_pos);
+                        info!("Initial auto-scroll to position {} for tab {}", target_pos, current_index);
+                    });
+                }
+
                 // Create close button (X)
                 let close_button = Button::with_label("✕");
                 close_button.set_width_request(28);
@@ -889,8 +928,25 @@ impl OverlayManager {
                 hbox.append(&scrolled_window);
                 hbox.append(&close_button);
 
+                // Add scroll event controller to the scrolled window for scrolling anywhere
+                let scroll_controller = gtk4::EventControllerScroll::new(
+                    gtk4::EventControllerScrollFlags::BOTH_AXES
+                );
+                let scrolled_window_for_scroll = scrolled_window.clone();
+                scroll_controller.connect_scroll(move |_, dx, dy| {
+                    let adj = scrolled_window_for_scroll.hadjustment();
+                    let current = adj.value();
+                    let step = 10.0; // Smaller step for smooth scrolling
+                    // Use both dx (horizontal scroll) and dy (vertical scroll/wheel)
+                    // Most mice scroll vertically, so we want vertical scrolling to scroll horizontally
+                    adj.set_value(current + (dy * step) + (dx * step));
+                    glib::Propagation::Stop
+                });
+                scrolled_window.add_controller(scroll_controller);
+
                 // Update buttons periodically when text changes
                 let spaces_box_clone = spaces_box.clone();
+                let scrolled_window_clone = scrolled_window.clone();
                 let label_text_clone = label_text.clone();
                 let mut last_text = text.clone();
 
@@ -959,6 +1015,8 @@ impl OverlayManager {
                                                 }
                                             }
                                         }
+                                    } else {
+                                        error!("Failed to connect to daemon at {}", socket_path);
                                     }
                                 });
                             });
@@ -1142,6 +1200,38 @@ impl OverlayManager {
                             spaces_box_clone.append(&space_button);
                         }
 
+                        // Auto-scroll to keep the current button visible with context
+                        // Find the current button and scroll to it
+                        if let Some(current_index) = parts.iter().position(|p| p.contains('[')) {
+                            // Schedule scroll after layout is complete
+                            let scrolled_window_for_autoscroll = scrolled_window_clone.clone();
+                            glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                                let adj = scrolled_window_for_autoscroll.hadjustment();
+                                let button_width = 32.0; // Approximate button width including margins
+                                let viewport_width = adj.page_size();
+
+                                // Calculate position to center the current button (or show with 1 button context)
+                                let target_pos = if total_spaces <= 1 {
+                                    0.0
+                                } else {
+                                    // Try to show 1 button before current if possible
+                                    let ideal_start_index = if current_index > 0 {
+                                        current_index - 1
+                                    } else {
+                                        0
+                                    };
+
+                                    let ideal_start = ideal_start_index as f64 * button_width;
+
+                                    // Clamp to valid range
+                                    let max_scroll = (total_spaces as f64 * button_width - viewport_width).max(0.0);
+                                    ideal_start.min(max_scroll).max(0.0)
+                                };
+
+                                adj.set_value(target_pos);
+                            });
+                        }
+
                         last_text = current_text;
                     }
 
@@ -1162,17 +1252,20 @@ impl OverlayManager {
                     scrolledwindow > scrollbar {
                         background: transparent;
                         border: none;
-                        min-width: 4px;
-                        min-height: 4px;
+                        min-width: 0px;
+                        min-height: 0px;
+                        opacity: 0;
                     }
                     scrolledwindow > scrollbar > slider {
-                        background: rgba(255, 255, 255, 0.2);
+                        background: transparent;
                         border-radius: 2px;
-                        min-width: 4px;
-                        min-height: 4px;
+                        min-width: 0px;
+                        min-height: 0px;
+                        opacity: 0;
                     }
                     scrolledwindow > scrollbar > slider:hover {
-                        background: rgba(255, 255, 255, 0.3);
+                        background: transparent;
+                        opacity: 0;
                     }
                     button {
                         background: transparent;
@@ -1272,6 +1365,30 @@ impl OverlayManager {
 
                 window.present();
                 info!("GTK overlay window created and shown");
+
+                // Perform initial auto-scroll after window is presented
+                // This ensures the adjustment is fully initialized
+                if let Some(current_index) = parts.iter().position(|p| p.contains('[')) {
+                    let scrolled_window_for_present_scroll = scrolled_window.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                        let adj = scrolled_window_for_present_scroll.hadjustment();
+                        let button_width = 32.0;
+                        let viewport_width = adj.page_size();
+
+                        let ideal_start_index = if current_index > 0 {
+                            current_index - 1
+                        } else {
+                            0
+                        };
+
+                        let ideal_start = ideal_start_index as f64 * button_width;
+                        let max_scroll = (total_spaces as f64 * button_width - viewport_width).max(0.0);
+                        let target_pos = ideal_start.min(max_scroll).max(0.0);
+
+                        adj.set_value(target_pos);
+                        info!("Post-present auto-scroll to position {} for tab {} (viewport: {}, max: {})", target_pos, current_index, viewport_width, max_scroll);
+                    });
+                }
             });
 
             info!("Starting GTK application");
@@ -1511,27 +1628,52 @@ fn show_settings_dialog(app: &Application) {
     apply_button.connect_clicked(move |_| {
         info!("Applying settings...");
 
-        // Read all form values and create config structure
-        let config_settings = serde_json::json!({
-            "side_mouse_binds": side_mouse_check_clone1.is_active(),
-            "overlay": {
-                "enabled": overlay_enabled_check_clone1.is_active(),
-                "from_area": from_area_combo_clone1.active_id().map(|s| s.to_string()).unwrap_or_else(|| "left".to_string()),
-                "from_overlay": from_overlay_combo_clone1.active_id().map(|s| s.to_string()).unwrap_or_else(|| "bot_left".to_string()),
-                "overlay_size": overlay_size_entry_clone1.text().to_string(),
-                "offset_x": offset_x_entry_clone1.text().parse::<i32>().unwrap_or(8),
-                "offset_y": offset_y_entry_clone1.text().parse::<i32>().unwrap_or(26),
-                "change_area_fraction": fraction_entry_clone1.text().parse::<f64>().unwrap_or(0.125),
-                "min_change_area_px": min_px_entry_clone1.text().parse::<i32>().unwrap_or(250),
-            },
-            "mouse": {
-                "change_area_fraction": fraction_entry_clone1.text().parse::<f64>().unwrap_or(0.125),
-                "min_change_area_px": min_px_entry_clone1.text().parse::<i32>().unwrap_or(250),
-            }
+        // Disable follow_mouse to prevent focus from changing if mouse moves during resize
+        let follow_mouse_output = std::process::Command::new("hyprctl")
+            .arg("getoption")
+            .arg("input:follow_mouse")
+            .arg("-j")
+            .output()
+            .ok();
+
+        let original_follow_mouse = follow_mouse_output
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .and_then(|json| json["int"].as_i64())
+            .unwrap_or(1);
+
+        // Disable follow_mouse (0 = focus doesn't follow mouse)
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("input:follow_mouse")
+            .arg("0")
+            .output();
+
+        // Read existing config to preserve templates
+        let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone1) {
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        // Update only the settings fields, preserve templates
+        existing_config["side_mouse_binds"] = serde_json::json!(side_mouse_check_clone1.is_active());
+        existing_config["overlay"] = serde_json::json!({
+            "enabled": overlay_enabled_check_clone1.is_active(),
+            "from_area": from_area_combo_clone1.active_id().map(|s| s.to_string()).unwrap_or_else(|| "left".to_string()),
+            "from_overlay": from_overlay_combo_clone1.active_id().map(|s| s.to_string()).unwrap_or_else(|| "bot_left".to_string()),
+            "overlay_size": overlay_size_entry_clone1.text().to_string(),
+            "offset_x": offset_x_entry_clone1.text().parse::<i32>().unwrap_or(8),
+            "offset_y": offset_y_entry_clone1.text().parse::<i32>().unwrap_or(26),
+            "change_area_fraction": fraction_entry_clone1.text().parse::<f64>().unwrap_or(0.125),
+            "min_change_area_px": min_px_entry_clone1.text().parse::<i32>().unwrap_or(250),
+        });
+        existing_config["mouse"] = serde_json::json!({
+            "change_area_fraction": fraction_entry_clone1.text().parse::<f64>().unwrap_or(0.125),
+            "min_change_area_px": min_px_entry_clone1.text().parse::<i32>().unwrap_or(250),
         });
 
         // Save to config file
-        if let Ok(content) = serde_json::to_string_pretty(&config_settings) {
+        if let Ok(content) = serde_json::to_string_pretty(&existing_config) {
             if let Err(e) = std::fs::write(&config_file_clone1, content) {
                 error!("Failed to save settings: {}", e);
                 return;
@@ -1544,7 +1686,7 @@ fn show_settings_dialog(app: &Application) {
         }
 
         // Send reload config command via IPC
-        std::thread::spawn(|| {
+        std::thread::spawn(move || {
             use std::io::{Write, Read};
 
             let socket_path = std::env::var("XDG_RUNTIME_DIR")
@@ -1578,6 +1720,13 @@ fn show_settings_dialog(app: &Application) {
             } else {
                 error!("Failed to connect to daemon at {}", socket_path);
             }
+
+            // Restore follow_mouse setting
+            let _ = std::process::Command::new("hyprctl")
+                .arg("keyword")
+                .arg("input:follow_mouse")
+                .arg(format!("{}", original_follow_mouse))
+                .output();
         });
     });
 
@@ -1587,27 +1736,52 @@ fn show_settings_dialog(app: &Application) {
     save_button.connect_clicked(move |_| {
         info!("Saving settings...");
 
-        // Read all form values and create config structure
-        let config_settings = serde_json::json!({
-            "side_mouse_binds": side_mouse_check.is_active(),
-            "overlay": {
-                "enabled": overlay_enabled_check.is_active(),
-                "from_area": from_area_combo.active_id().map(|s| s.to_string()).unwrap_or_else(|| "left".to_string()),
-                "from_overlay": from_overlay_combo.active_id().map(|s| s.to_string()).unwrap_or_else(|| "bot_left".to_string()),
-                "overlay_size": overlay_size_entry.text().to_string(),
-                "offset_x": offset_x_entry.text().parse::<i32>().unwrap_or(8),
-                "offset_y": offset_y_entry.text().parse::<i32>().unwrap_or(26),
-                "change_area_fraction": fraction_entry.text().parse::<f64>().unwrap_or(0.125),
-                "min_change_area_px": min_px_entry.text().parse::<i32>().unwrap_or(250),
-            },
-            "mouse": {
-                "change_area_fraction": fraction_entry.text().parse::<f64>().unwrap_or(0.125),
-                "min_change_area_px": min_px_entry.text().parse::<i32>().unwrap_or(250),
-            }
+        // Disable follow_mouse to prevent focus from changing if mouse moves during resize
+        let follow_mouse_output = std::process::Command::new("hyprctl")
+            .arg("getoption")
+            .arg("input:follow_mouse")
+            .arg("-j")
+            .output()
+            .ok();
+
+        let original_follow_mouse = follow_mouse_output
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .and_then(|json| json["int"].as_i64())
+            .unwrap_or(1);
+
+        // Disable follow_mouse (0 = focus doesn't follow mouse)
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("input:follow_mouse")
+            .arg("0")
+            .output();
+
+        // Read existing config to preserve templates
+        let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone2) {
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        // Update only the settings fields, preserve templates
+        existing_config["side_mouse_binds"] = serde_json::json!(side_mouse_check.is_active());
+        existing_config["overlay"] = serde_json::json!({
+            "enabled": overlay_enabled_check.is_active(),
+            "from_area": from_area_combo.active_id().map(|s| s.to_string()).unwrap_or_else(|| "left".to_string()),
+            "from_overlay": from_overlay_combo.active_id().map(|s| s.to_string()).unwrap_or_else(|| "bot_left".to_string()),
+            "overlay_size": overlay_size_entry.text().to_string(),
+            "offset_x": offset_x_entry.text().parse::<i32>().unwrap_or(8),
+            "offset_y": offset_y_entry.text().parse::<i32>().unwrap_or(26),
+            "change_area_fraction": fraction_entry.text().parse::<f64>().unwrap_or(0.125),
+            "min_change_area_px": min_px_entry.text().parse::<i32>().unwrap_or(250),
+        });
+        existing_config["mouse"] = serde_json::json!({
+            "change_area_fraction": fraction_entry.text().parse::<f64>().unwrap_or(0.125),
+            "min_change_area_px": min_px_entry.text().parse::<i32>().unwrap_or(250),
         });
 
         // Save to config file
-        if let Ok(content) = serde_json::to_string_pretty(&config_settings) {
+        if let Ok(content) = serde_json::to_string_pretty(&existing_config) {
             if let Err(e) = std::fs::write(&config_file_clone2, content) {
                 error!("Failed to save settings: {}", e);
                 return;
@@ -1620,7 +1794,7 @@ fn show_settings_dialog(app: &Application) {
         }
 
         // Send reload config command via IPC
-        std::thread::spawn(|| {
+        std::thread::spawn(move || {
             use std::io::{Write, Read};
 
             let socket_path = std::env::var("XDG_RUNTIME_DIR")
@@ -1654,6 +1828,13 @@ fn show_settings_dialog(app: &Application) {
             } else {
                 error!("Failed to connect to daemon at {}", socket_path);
             }
+
+            // Restore follow_mouse setting
+            let _ = std::process::Command::new("hyprctl")
+                .arg("keyword")
+                .arg("input:follow_mouse")
+                .arg(format!("{}", original_follow_mouse))
+                .output();
         });
 
         dialog_clone2.close();
@@ -1719,12 +1900,558 @@ fn show_settings_dialog(app: &Application) {
     dialog.present();
 }
 
+
+fn show_new_space_window() {
+    info!("Creating new space window");
+
+    let dialog = gtk4::Window::builder()
+        .title("New Space")
+        .default_width(500)
+        .default_height(400)
+        .modal(true)
+        .build();
+
+    // Add float and center rules
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("windowrulev2")
+            .arg("float,title:^(New Space)$")
+            .output();
+        let _ = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .arg("windowrulev2")
+            .arg("center,title:^(New Space)$")
+            .output();
+    });
+
+    // Create a container for swappable content
+    let container = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    dialog.set_child(Some(&container));
+
+    // Add CSS class to dialog
+    dialog.add_css_class("template-window");
+
+    // Show the template list view initially
+    show_template_list_view(&dialog, &container);
+
+    dialog.present();
+}
+
+fn show_template_list_view(dialog: &gtk4::Window, container: &gtk4::Box) {
+    // Clear existing content
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(20);
+    vbox.set_margin_bottom(20);
+
+    let title_label = gtk4::Label::new(Some("Create New Space"));
+    title_label.add_css_class("title-label");
+    vbox.append(&title_label);
+
+    // Fetch templates
+    let templates = std::thread::spawn(|| {
+        use std::io::{Write, Read};
+
+        let socket_path = std::env::var("XDG_RUNTIME_DIR")
+            .map(|d| format!("{}/space-manager.sock", d))
+            .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+            let cmd = serde_json::json!("GetTemplates");
+            if let Ok(data) = serde_json::to_vec(&cmd) {
+                let len = (data.len() as u32).to_le_bytes();
+                let _ = stream.write_all(&len);
+                let _ = stream.write_all(&data);
+                let _ = stream.flush();
+
+                let mut len_bytes = [0u8; 4];
+                if stream.read_exact(&mut len_bytes).is_ok() {
+                    let response_len = u32::from_le_bytes(len_bytes) as usize;
+                    let mut response_data = vec![0u8; response_len];
+                    if stream.read_exact(&mut response_data).is_ok() {
+                        if let Ok(response) = serde_json::from_slice::<serde_json::Value>(&response_data) {
+                            if let Some(templates) = response.get("Templates") {
+                                return Some(templates.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }).join().ok().flatten();
+
+    // Create scrolled window for templates list
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .build();
+
+    let templates_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+
+    if let Some(templates_arr) = templates.and_then(|t| t.as_array().cloned()) {
+        if templates_arr.is_empty() {
+            let empty_label = gtk4::Label::new(Some("No templates yet. Create one below!"));
+            empty_label.add_css_class("dim-label");
+            templates_box.append(&empty_label);
+        } else {
+            for template in templates_arr {
+                let name = template["name"].as_str().unwrap_or("Unknown").to_string();
+                let command = template["command"].as_str().unwrap_or("").to_string();
+
+                // Create a horizontal box for template name and delete button
+                let item_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                item_box.set_margin_start(8);
+                item_box.set_margin_end(8);
+                item_box.set_margin_top(4);
+                item_box.set_margin_bottom(4);
+
+                // Template button (takes most space)
+                let template_btn = gtk4::Button::with_label(&name);
+                template_btn.set_hexpand(true);
+                template_btn.add_css_class("template-button");
+                template_btn.set_cursor_from_name(Some("pointer"));
+
+                let container_clone = container.clone();
+                let dialog_clone = dialog.clone();
+                let command_clone = command.clone();
+                let name_clone = name.clone();
+                template_btn.connect_clicked(move |_| {
+                    info!("Template selected: {}", name_clone);
+                    show_template_use_view(&dialog_clone, &container_clone, &command_clone);
+                });
+
+                // Delete button
+                let delete_btn = gtk4::Button::with_label("🗑");
+                delete_btn.set_width_request(36);
+                delete_btn.add_css_class("delete-button");
+                delete_btn.set_cursor_from_name(Some("pointer"));
+                delete_btn.set_tooltip_text(Some("Delete this template"));
+
+                let name_for_delete = name.clone();
+                let container_clone2 = container.clone();
+                let dialog_clone2 = dialog.clone();
+                delete_btn.connect_clicked(move |_| {
+                    info!("Delete template: {}", name_for_delete);
+
+                    // Send RemoveTemplate command via IPC
+                    let name_clone = name_for_delete.clone();
+                    std::thread::spawn(move || {
+                        use std::io::Write;
+                        let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                            .map(|d| format!("{}/space-manager.sock", d))
+                            .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                            let cmd = serde_json::json!({"RemoveTemplate": name_clone});
+                            if let Ok(data) = serde_json::to_vec(&cmd) {
+                                let len = (data.len() as u32).to_le_bytes();
+                                let _ = stream.write_all(&len);
+                                let _ = stream.write_all(&data);
+                                let _ = stream.flush();
+                            }
+                        }
+                    });
+
+                    // Refresh the template list
+                    show_template_list_view(&dialog_clone2, &container_clone2);
+                });
+
+                item_box.append(&template_btn);
+                item_box.append(&delete_btn);
+                templates_box.append(&item_box);
+            }
+        }
+    }
+
+    scrolled.set_child(Some(&templates_box));
+    vbox.append(&scrolled);
+
+    // Bottom buttons
+    let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    button_box.set_halign(gtk4::Align::End);
+
+    let add_template_btn = gtk4::Button::with_label("✚ Add Template");
+    add_template_btn.set_cursor_from_name(Some("pointer"));
+
+    let container_clone = container.clone();
+    let dialog_clone = dialog.clone();
+    add_template_btn.connect_clicked(move |_| {
+        info!("Add Template clicked - switching to add template view");
+        show_add_template_view(&dialog_clone, &container_clone);
+    });
+
+    let close_btn = gtk4::Button::with_label("Close");
+    let dialog_clone2 = dialog.clone();
+    close_btn.connect_clicked(move |_| {
+        dialog_clone2.close();
+    });
+
+    button_box.append(&add_template_btn);
+    button_box.append(&close_btn);
+    vbox.append(&button_box);
+
+    container.append(&vbox);
+}
+
+fn show_template_use_view(dialog: &gtk4::Window, container: &gtk4::Box, command_template: &str) {
+    // Clear existing content
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+
+    // Extract variables from template like {{variable}}
+    let re = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+    let mut variables: Vec<String> = vec![];
+    for cap in re.captures_iter(command_template) {
+        if let Some(var) = cap.get(1) {
+            let var_name = var.as_str().to_string();
+            // Avoid duplicates
+            if !variables.contains(&var_name) {
+                variables.push(var_name);
+            }
+        }
+    }
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(20);
+    vbox.set_margin_bottom(20);
+
+    let title_label = gtk4::Label::new(Some("Create Space from Template"));
+    title_label.add_css_class("title-label");
+    vbox.append(&title_label);
+
+    // Show the command template (read-only) with better styling
+    let template_label = gtk4::Label::new(Some("Template:"));
+    template_label.set_halign(gtk4::Align::Start);
+    template_label.add_css_class("field-label");
+
+    let template_display = gtk4::Label::new(Some(command_template));
+    template_display.set_halign(gtk4::Align::Start);
+    template_display.set_wrap(true);
+    template_display.add_css_class("template-display");
+
+    vbox.append(&template_label);
+    vbox.append(&template_display);
+
+    // Add separator
+    let separator = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    separator.set_margin_top(8);
+    separator.set_margin_bottom(8);
+    vbox.append(&separator);
+
+    // Position/index field
+    let position_label = gtk4::Label::new(Some("Position (leave empty to append):"));
+    position_label.set_halign(gtk4::Align::Start);
+    position_label.add_css_class("field-label");
+    let position_entry = gtk4::Entry::new();
+    position_entry.set_placeholder_text(Some("e.g. 1 (first), 2 (second), etc. or empty to add at end"));
+
+    vbox.append(&position_label);
+    vbox.append(&position_entry);
+
+    // Optional icon field
+    let icon_label = gtk4::Label::new(Some("Icon (optional):"));
+    icon_label.set_halign(gtk4::Align::Start);
+    icon_label.add_css_class("field-label");
+    let icon_entry = gtk4::Entry::new();
+    icon_entry.set_placeholder_text(Some("e.g. 🌐 or leave empty"));
+
+    vbox.append(&icon_label);
+    vbox.append(&icon_entry);
+
+    // Create entries for each template variable
+    let mut variable_entries: Vec<(String, gtk4::Entry)> = vec![];
+    for var in &variables {
+        let var_label = gtk4::Label::new(Some(&format!("{}:", var)));
+        var_label.set_halign(gtk4::Align::Start);
+        var_label.add_css_class("field-label");
+        let var_entry = gtk4::Entry::new();
+        var_entry.set_placeholder_text(Some(&format!("Value for {{{{{}}}}}", var)));
+
+        vbox.append(&var_label);
+        vbox.append(&var_entry);
+        variable_entries.push((var.clone(), var_entry));
+    }
+
+    let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    button_box.set_halign(gtk4::Align::End);
+
+    let cancel_btn = gtk4::Button::with_label("Cancel");
+    cancel_btn.add_css_class("dialog-button");
+    let container_clone = container.clone();
+    let dialog_clone = dialog.clone();
+    cancel_btn.connect_clicked(move |_| {
+        info!("Cancel clicked - returning to template list");
+        show_template_list_view(&dialog_clone, &container_clone);
+    });
+
+    let create_btn = gtk4::Button::with_label("Create Space");
+    create_btn.add_css_class("suggested-action");
+    create_btn.add_css_class("dialog-button");
+    let command_template_owned = command_template.to_string();
+    let position_entry_clone = position_entry.clone();
+    let icon_entry_clone = icon_entry.clone();
+    let dialog_clone2 = dialog.clone();
+    create_btn.connect_clicked(move |_| {
+        let position_str = position_entry_clone.text().to_string();
+        let position_opt: Option<usize> = if position_str.is_empty() {
+            None
+        } else {
+            // User enters 1-based position (1, 2, 3...), convert to 0-based index
+            position_str.parse::<usize>().ok().and_then(|p| if p > 0 { Some(p - 1) } else { None })
+        };
+
+        let icon = icon_entry_clone.text().to_string();
+        let icon_opt = if icon.is_empty() { None } else { Some(icon) };
+
+        // Replace variables in command
+        let mut final_command = command_template_owned.clone();
+        for (var, entry) in &variable_entries {
+            let value = entry.text().to_string();
+            final_command = final_command.replace(&format!("{{{{{}}}}}", var), &value);
+        }
+
+        info!("Spawning with command: {}", final_command);
+        dialog_clone2.close();
+
+        // Send SpawnAt or Spawn command via IPC
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                .map(|d| format!("{}/space-manager.sock", d))
+                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                let cmd = if let Some(idx) = position_opt {
+                    serde_json::json!({"SpawnAt": [idx, final_command, icon_opt]})
+                } else {
+                    serde_json::json!({"Spawn": final_command})
+                };
+
+                if let Ok(data) = serde_json::to_vec(&cmd) {
+                    let len = (data.len() as u32).to_le_bytes();
+                    let _ = stream.write_all(&len);
+                    let _ = stream.write_all(&data);
+                    let _ = stream.flush();
+                }
+            }
+        });
+    });
+
+    button_box.append(&cancel_btn);
+    button_box.append(&create_btn);
+
+    vbox.append(&button_box);
+
+    // Add CSS for better styling - use specific classes to avoid conflicts
+    let css_provider = gtk4::CssProvider::new();
+    css_provider.load_from_data(
+        "window.template-window {
+            background-color: #2b2b2b;
+        }
+        window.template-window label.title-label {
+            color: #e0e0e0;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        window.template-window label.field-label {
+            color: #e0e0e0;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        window.template-window label.template-display {
+            color: #a0a0a0;
+            font-size: 12px;
+            font-style: italic;
+            padding: 8px;
+            background-color: #1e1e1e;
+            border-radius: 4px;
+        }
+        window.template-window entry {
+            background-color: #3c3c3c;
+            color: #e0e0e0;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        window.template-window entry:focus {
+            border-color: #4a90e2;
+        }
+        window.template-window button.dialog-button {
+            background: #4a4a4a;
+            color: #e0e0e0;
+            border-radius: 4px;
+            border: 1px solid #555555;
+            padding: 8px 16px;
+        }
+        window.template-window button.dialog-button:hover {
+            background: #5a5a5a;
+        }
+        window.template-window button.suggested-action {
+            background: #4a90e2;
+            color: #ffffff;
+            border: 1px solid #357abd;
+        }
+        window.template-window button.suggested-action:hover {
+            background: #5aa0f2;
+        }
+        window.template-window separator {
+            background-color: #555555;
+        }"
+    );
+
+    gtk4::style_context_add_provider_for_display(
+        &gtk4::prelude::WidgetExt::display(dialog),
+        &css_provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    container.append(&vbox);
+}
+
+
+fn show_add_template_view(dialog: &gtk4::Window, container: &gtk4::Box) {
+    // Clear existing content
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(20);
+    vbox.set_margin_bottom(20);
+    let title_label = gtk4::Label::new(Some("Add Command Template"));
+    title_label.add_css_class("title-label");
+    vbox.append(&title_label);
+    // Template name
+    let name_label = gtk4::Label::new(Some("Template Name:"));
+    name_label.set_halign(gtk4::Align::Start);
+    name_label.add_css_class("field-label");
+    let name_entry = gtk4::Entry::new();
+    name_entry.set_placeholder_text(Some("e.g. Browser Profile"));
+    vbox.append(&name_label);
+    vbox.append(&name_entry);
+    // Command with placeholders
+    let command_label = gtk4::Label::new(Some("Command (use {{variable}} for placeholders):"));
+    command_label.set_halign(gtk4::Align::Start);
+    command_label.add_css_class("field-label");
+    let command_entry = gtk4::Entry::new();
+    command_entry.set_placeholder_text(Some("e.g. brave --user-data-dir=\"$HOME/.config/{{profile}}\""));
+    vbox.append(&command_label);
+    vbox.append(&command_entry);
+    let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    button_box.set_halign(gtk4::Align::End);
+    let cancel_btn = gtk4::Button::with_label("Cancel");
+    cancel_btn.add_css_class("dialog-button");
+    let container_clone = container.clone();
+    let dialog_clone = dialog.clone();
+    cancel_btn.connect_clicked(move |_| {
+        info!("Cancel clicked - returning to template list");
+        show_template_list_view(&dialog_clone, &container_clone);
+    });
+    let save_btn = gtk4::Button::with_label("Save");
+    save_btn.add_css_class("suggested-action");
+    save_btn.add_css_class("dialog-button");
+    let name_entry_clone = name_entry.clone();
+    let command_entry_clone = command_entry.clone();
+    let container_clone2 = container.clone();
+    let dialog_clone2 = dialog.clone();
+    save_btn.connect_clicked(move |_| {
+        let name = name_entry_clone.text().to_string();
+        let command = command_entry_clone.text().to_string();
+        if name.is_empty() || command.is_empty() {
+            return;
+        }
+        // Send AddTemplate command via IPC
+        let name_clone = name.clone();
+        let command_clone = command.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                .map(|d| format!("{}/space-manager.sock", d))
+                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                let cmd = serde_json::json!({"AddTemplate": [name_clone, command_clone]});
+                if let Ok(data) = serde_json::to_vec(&cmd) {
+                    let len = (data.len() as u32).to_le_bytes();
+                    let _ = stream.write_all(&len);
+                    let _ = stream.write_all(&data);
+                    let _ = stream.flush();
+                }
+            }
+        });
+        // Return to template list
+        show_template_list_view(&dialog_clone2, &container_clone2);
+    });
+    button_box.append(&cancel_btn);
+    button_box.append(&save_btn);
+    vbox.append(&button_box);
+    // Add CSS for styling - use template-window scope to avoid conflicts
+    let css_provider = gtk4::CssProvider::new();
+    css_provider.load_from_data(
+        "window.template-window {
+            background-color: #2b2b2b;
+        }
+        window.template-window label.title-label {
+            color: #e0e0e0;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        window.template-window label.field-label {
+            color: #e0e0e0;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        window.template-window entry {
+            background-color: #3c3c3c;
+            color: #e0e0e0;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        window.template-window entry:focus {
+            border-color: #4a90e2;
+        }
+        window.template-window button.dialog-button {
+            background: #4a4a4a;
+            color: #e0e0e0;
+            border-radius: 4px;
+            border: 1px solid #555555;
+            padding: 8px 16px;
+        }
+        window.template-window button.dialog-button:hover {
+            background: #5a5a5a;
+        }
+        window.template-window button.suggested-action {
+            background: #4a90e2;
+            color: #ffffff;
+            border: 1px solid #357abd;
+        }
+        window.template-window button.suggested-action:hover {
+            background: #5aa0f2;
+        }"
+    );
+    gtk4::style_context_add_provider_for_display(
+        &gtk4::prelude::WidgetExt::display(dialog),
+        &css_provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    container.append(&vbox);
+}
 fn get_monitor_size() -> (i32, i32) {
     let output = std::process::Command::new("hyprctl")
         .arg("monitors")
         .arg("-j")
         .output();
-
     if let Ok(output) = output {
         if let Ok(monitors) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             if let Some(monitor) = monitors.as_array().and_then(|m| m.first()) {
@@ -1734,50 +2461,39 @@ fn get_monitor_size() -> (i32, i32) {
             }
         }
     }
-
     // Default to 1920x1080 if we can't get monitor info
     (1920, 1080)
 }
-
 fn get_active_window_geometry() -> Option<(i32, i32, i32, i32)> {
     let output = std::process::Command::new("hyprctl")
         .arg("activewindow")
         .arg("-j")
         .output()
         .ok()?;
-
     let window: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-
     let x = window["at"][0].as_i64()? as i32;
     let y = window["at"][1].as_i64()? as i32;
     let width = window["size"][0].as_i64()? as i32;
     let height = window["size"][1].as_i64()? as i32;
-
     Some((x, y, width, height))
 }
-
 fn get_active_workspace() -> Option<i32> {
     let output = std::process::Command::new("hyprctl")
         .arg("activeworkspace")
         .arg("-j")
         .output()
         .ok()?;
-
     let workspace: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let id = workspace["id"].as_i64()? as i32;
-
     Some(id)
 }
-
 fn get_overlay_window_position() -> Option<(i32, i32)> {
     let output = std::process::Command::new("hyprctl")
         .arg("clients")
         .arg("-j")
         .output()
         .ok()?;
-
     let clients: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-
     for client in clients.as_array()? {
         if let Some(title) = client["title"].as_str() {
             if title == "Space Manager Overlay" {
@@ -1787,7 +2503,5 @@ fn get_overlay_window_position() -> Option<(i32, i32)> {
             }
         }
     }
-
     None
 }
-

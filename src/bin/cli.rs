@@ -70,6 +70,20 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Response::Templates(templates) => {
+            if templates.is_empty() {
+                println!("No command templates");
+            } else {
+                println!("Command templates:");
+                for template in templates.iter() {
+                    println!(
+                        "  - {}: {}",
+                        template["name"].as_str().unwrap_or("?"),
+                        template["command"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

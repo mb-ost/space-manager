@@ -13,6 +13,7 @@ pub struct PendingSpawn {
     pub command: String,
     pub spawn_time: u64,
     pub pid: Option<u32>,
+    pub window_id: Option<String>,  // Track which specific window we're spawning
 }
 
 impl ProcessLauncher {
@@ -22,7 +23,7 @@ impl ProcessLauncher {
         }
     }
 
-    pub async fn spawn(&self, command: String) -> Result<u32> {
+    pub async fn spawn(&self, command: String, window_id: Option<String>) -> Result<u32> {
         debug!("Spawning command: {}", command);
 
         let child = Command::new("/bin/sh")
@@ -45,6 +46,7 @@ impl ProcessLauncher {
             command,
             spawn_time,
             pid: Some(pid),
+            window_id,
         };
 
         self.pending_spawns.write().await.push(pending);

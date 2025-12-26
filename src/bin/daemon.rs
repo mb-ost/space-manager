@@ -197,7 +197,7 @@ impl Daemon {
                     // 3. Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone()).await {
+                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
                             Ok(_) => {
                                 // Window will be opened in handle_window_open
                                 info!("Spawned closed window, waiting for it to open...");
@@ -278,7 +278,7 @@ impl Daemon {
                     // 3. Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone()).await {
+                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
                             Ok(_) => {
                                 // Window will be opened in handle_window_open
                                 info!("Spawned closed window, waiting for it to open...");
@@ -328,7 +328,7 @@ impl Daemon {
                 let _ = self.focus_current_visible().await;
 
                 // 2. Now spawn the process (new window will open next to focused window)
-                match self.launcher.spawn(command.clone()).await {
+                match self.launcher.spawn(command.clone(), None).await {
                     Ok(pid) => {
                         info!("Spawned process with PID: {}", pid);
                         Response::Ok
@@ -347,7 +347,7 @@ impl Daemon {
                     // Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone()).await {
+                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
                             Ok(_) => {
                                 info!("Spawned closed window, waiting for it to open...");
                                 return Response::Ok;
@@ -378,17 +378,17 @@ impl Daemon {
             }
             Command::SwapWindows(index1, index2) => {
                 info!("Swapping windows at indices {} and {}", index1, index2);
-                
+
                 match self.manager.swap_windows(index1, index2).await {
                     Ok(_) => {
                         // Save the updated window order
                         if let Err(e) = self.manager.save_state().await {
                             error!("Failed to save state after swap: {}", e);
                         }
-                        
+
                         // Update overlay to reflect new order
                         self.update_overlay().await;
-                        
+
                         Response::Ok
                     }
                     Err(e) => {
@@ -399,17 +399,17 @@ impl Daemon {
             }
             Command::SetWindowIcon(index, icon) => {
                 info!("Setting icon for window {} to: {}", index, icon);
-                
+
                 match self.manager.set_window_icon(index, icon).await {
                     Ok(_) => {
                         // Save the updated icon
                         if let Err(e) = self.manager.save_state().await {
                             error!("Failed to save state after icon change: {}", e);
                         }
-                        
+
                         // Update overlay to show new icon
                         self.update_overlay().await;
-                        
+
                         Response::Ok
                     }
                     Err(e) => {
@@ -451,6 +451,76 @@ impl Daemon {
                     Err(e) => {
                         error!("Failed to reload config: {}", e);
                         Response::Error(format!("Failed to reload config: {}", e))
+                    }
+                }
+            }
+            Command::GetTemplates => {
+                let templates = self.manager.get_templates().await;
+                let json_templates: Vec<serde_json::Value> = templates
+                    .into_iter()
+                    .map(|t| serde_json::json!({"name": t.name, "command": t.command}))
+                    .collect();
+                Response::Templates(json_templates)
+            }
+            Command::AddTemplate(name, command) => {
+                use browser_spaces::manager::CommandTemplate;
+                let template = CommandTemplate { name, command };
+                match self.manager.add_template(template).await {
+                    Ok(_) => {
+                        info!("Template added successfully");
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to add template: {}", e);
+                        Response::Error(format!("Failed to add template: {}", e))
+                    }
+                }
+            }
+            Command::RemoveTemplate(name) => {
+                match self.manager.remove_template(&name).await {
+                    Ok(_) => {
+                        info!("Template '{}' removed successfully", name);
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to remove template: {}", e);
+                        Response::Error(format!("Failed to remove template: {}", e))
+                    }
+                }
+            }
+            Command::SpawnAt(index, command, icon) => {
+                info!("Spawning new window at index {} with command: {}", index, command);
+
+                // Focus current visible window first
+                let _ = self.focus_current_visible().await;
+
+                // Create the window at the specified index first
+                let window = ManagedWindow::new(command.clone());
+                let window_id = window.id.clone();  // Save the ID before moving the window
+
+                // Insert at the specified index
+                self.manager.insert_window_at(index, window).await;
+
+                // Set icon if provided
+                if let Some(icon_str) = icon {
+                    if let Err(e) = self.manager.set_window_icon(index, icon_str).await {
+                        error!("Failed to set window icon: {}", e);
+                    }
+                }
+
+                // Spawn the process with the window ID so it matches correctly
+                match self.launcher.spawn(command.clone(), Some(window_id)).await {
+                    Ok(pid) => {
+                        info!("Spawned process with PID: {}", pid);
+
+                        // If an icon was provided, we'll need to set it after the window opens
+                        // Store this info in a pending map (we'll need to add this)
+                        // For now, just acknowledge success
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to spawn process: {}", e);
+                        Response::Error(format!("Failed to spawn: {}", e))
                     }
                 }
             }
@@ -608,16 +678,31 @@ impl Daemon {
                     info!("✓ Matched spawned window: {} ({})", client.title, client.class);
 
                     // Check if this is opening an existing closed window
-                    let was_reopened = self.manager.open_window_by_command(
-                        &pending.command,
-                        address.clone(),
-                        client.class.clone(),
-                        client.title.clone(),
-                        pid_value,
-                    ).await;
+                    let was_reopened = if let Some(ref window_id) = pending.window_id {
+                        // We know the exact window ID - use it for precise matching
+                        self.manager.open_window_by_id(
+                            window_id,
+                            address.clone(),
+                            client.class.clone(),
+                            client.title.clone(),
+                            pid_value,
+                        ).await
+                    } else {
+                        // Fallback to command matching (for new spawns without ID)
+                        self.manager.open_window_by_command(
+                            &pending.command,
+                            address.clone(),
+                            client.class.clone(),
+                            client.title.clone(),
+                            pid_value,
+                        ).await
+                    };
 
                     if was_reopened {
                         info!("✓ Reopened existing window");
+
+                        // Update current index to point to the reopened window
+                        self.manager.switch_to_address(&address).await;
 
                         // Show the reopened window
                         if let Err(e) = self.update_visibility(&address).await {
@@ -690,28 +775,29 @@ impl Daemon {
                 error!("Failed to save state after window close: {}", e);
             }
 
-            // Switch to next window (open or spawn closed one in same workspace)
+            // After removal, current index already points to the next window (the one that took its place)
+            // We don't need to call next() - just get the current window
             let windows = self.manager.get_windows().await;
 
             if !windows.is_empty() {
-                if let Some(next_window) = self.manager.next().await {
-                    if next_window.is_open() {
-                        info!("Auto-switching to next open window");
-                        if let Err(e) = self.update_visibility(&next_window.address).await {
-                            error!("Failed to switch to next window: {}", e);
+                if let Some(current_window) = self.manager.current_window().await {
+                    if current_window.is_open() {
+                        info!("Auto-switching to current window after close");
+                        if let Err(e) = self.update_visibility(&current_window.address).await {
+                            error!("Failed to switch to current window: {}", e);
                         }
                         // Update overlay
                         self.update_overlay().await;
                     } else {
-                        // Next window is closed - spawn it in the same workspace as the closed window
-                        info!("Next window is closed, spawning in same workspace");
+                        // Current window is closed - spawn it in the same workspace as the closed window
+                        info!("Current window is closed, spawning in same workspace");
 
                         // The current_workspace should still have the workspace of the closed window
                         let workspace = *self.current_workspace.read().await;
                         info!("Spawning in workspace: {:?}", workspace);
 
                         // Spawn the command - it will inherit the workspace because we track it in memory
-                        match self.launcher.spawn(next_window.spawn_command.clone()).await {
+                        match self.launcher.spawn(current_window.spawn_command.clone(), Some(current_window.id.clone())).await {
                             Ok(_) => {
                                 info!("Spawned closed window in same workspace");
                             }
@@ -843,7 +929,7 @@ impl Daemon {
             let change_area_fraction = overlay_config.change_area_fraction;
             let min_change_area_px = overlay_config.min_change_area_px;
             let from_area = overlay_config.from_area.clone();
-            
+
             // Get window data for custom icons
             let windows = self.manager.get_windows().await;
 
@@ -1113,9 +1199,9 @@ async fn main() -> Result<()> {
             // Only restore the current window immediately, others stay closed
             let current_index = daemon.manager.get_current_index().await;
             if current_index < saved_windows.len() {
-                let command = &saved_windows[current_index].spawn_command;
-                info!("Restoring current window ({}): {}", current_index, command);
-                match daemon.launcher.spawn(command.clone()).await {
+                let window = &saved_windows[current_index];
+                info!("Restoring current window ({}): {}", current_index, window.spawn_command);
+                match daemon.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
                     Ok(pid) => {
                         info!("Restored current window with PID: {}", pid);
                     }

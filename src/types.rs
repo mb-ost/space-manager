@@ -67,9 +67,13 @@ pub enum Command {
     SwapWindows(usize, usize),  // Swap two windows by index
     SetWindowIcon(usize, String),  // Set custom icon/label for a window
     Spawn(String),
+    SpawnAt(usize, String, Option<String>),  // Spawn at specific index with optional icon
     List,
     Cleanup,  // Close all windows in special:spaces
-    ReloadConfig,  // Reload configuration from state.json
+    ReloadConfig,  // Reload configuration from config.json
+    GetTemplates,  // Get list of command templates
+    AddTemplate(String, String),  // Add new template (name, command)
+    RemoveTemplate(String),  // Remove template by name
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,4 +81,5 @@ pub enum Response {
     Ok,
     Error(String),
     Windows(Vec<ManagedWindow>),
+    Templates(Vec<serde_json::Value>),  // JSON representation of templates
 }
