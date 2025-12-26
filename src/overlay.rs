@@ -573,6 +573,7 @@ impl OverlayManager {
                 menu_button.set_width_request(28);
                 menu_button.set_height_request(28);
                 menu_button.add_css_class("menu-button");
+                menu_button.set_cursor_from_name(Some("pointer"));
 
                 // Create popover menu
                 let menu = gtk4::gio::Menu::new();
@@ -594,17 +595,93 @@ impl OverlayManager {
                 });
                 app.add_action(&settings_action);
 
-                // Create label
-                let label = Label::builder()
-                    .hexpand(true)
-                    .halign(gtk4::Align::Center)
-                    .build();
+                // Create horizontal box for space buttons
+                let spaces_box = GtkBox::new(Orientation::Horizontal, 4);
+                spaces_box.set_halign(gtk4::Align::Center);
+                spaces_box.set_hexpand(true);
+
+                // We need to get the label text synchronously, so we'll use a blocking approach
+                // In GTK context, we can use the current text value
+                let text = {
+                    // Read initial text - this is in the GTK activation context
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        label_text.read().await.clone()
+                    })
+                };
+
+                // Extract parts and create buttons
+                let parts: Vec<&str> = text.split('-').collect();
+
+                for (index, part) in parts.iter().enumerate() {
+                    let part_str: &str = *part;
+                    let is_current = part_str.contains('[');
+                    let space_num = part_str.replace('[', "").replace(']', "");
+
+                    let space_button = Button::builder()
+                        .label(&space_num)
+                        .width_request(28)
+                        .height_request(28)
+                        .build();
+
+                    if is_current {
+                        space_button.add_css_class("space-button-current");
+                    } else {
+                        space_button.add_css_class("space-button");
+                    }
+
+                    // Connect click handler to switch to this space
+                    let target_index = index;
+                    space_button.connect_clicked(move |_| {
+                        info!("Space button {} clicked, switching to space {}", space_num, target_index);
+
+                        // Send switch command via IPC
+                        std::thread::spawn(move || {
+                            use std::io::{Write, Read};
+
+                            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                .map(|d| format!("{}/space-manager.sock", d))
+                                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                // Send SwitchTo command with the target index
+                                let cmd = serde_json::json!({"SwitchTo": target_index});
+                                if let Ok(data) = serde_json::to_vec(&cmd) {
+                                    let len = (data.len() as u32).to_le_bytes();
+                                    let _ = stream.write_all(&len);
+                                    let _ = stream.write_all(&data);
+                                    let _ = stream.flush();
+
+                                    // Read response (optional)
+                                    let mut len_bytes = [0u8; 4];
+                                    if stream.read_exact(&mut len_bytes).is_ok() {
+                                        let response_len = u32::from_le_bytes(len_bytes) as usize;
+                                        let mut response_data = vec![0u8; response_len];
+                                        if stream.read_exact(&mut response_data).is_ok() {
+                                            if let Ok(response) = serde_json::from_slice::<serde_json::Value>(&response_data) {
+                                                info!("Switch response: {:?}", response);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                error!("Failed to connect to daemon at {}", socket_path);
+                            }
+                        });
+                    });
+
+                    // Set cursor to pointer for buttons
+                    space_button.set_cursor_from_name(Some("pointer"));
+
+                    spaces_box.append(&space_button);
+                }
 
                 // Create close button (X)
                 let close_button = Button::with_label("✕");
                 close_button.set_width_request(28);
                 close_button.set_height_request(28);
                 close_button.add_css_class("close-button");
+                close_button.set_cursor_from_name(Some("pointer"));
 
                 // Connect close button to kill the daemon
                 close_button.connect_clicked(|_| {
@@ -618,8 +695,90 @@ impl OverlayManager {
                 });
 
                 hbox.append(&menu_button);
-                hbox.append(&label);
+                hbox.append(&spaces_box);
                 hbox.append(&close_button);
+
+                // Update buttons periodically when text changes
+                let spaces_box_clone = spaces_box.clone();
+                let label_text_clone = label_text.clone();
+                let mut last_text = text.clone();
+
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let current_text = glib::MainContext::default().block_on(async {
+                        label_text_clone.read().await.clone()
+                    });
+
+                    // Only update if text has changed
+                    if current_text != last_text {
+                        // Remove all existing buttons
+                        while let Some(child) = spaces_box_clone.first_child() {
+                            spaces_box_clone.remove(&child);
+                        }
+
+                        // Recreate buttons with new state
+                        let parts: Vec<&str> = current_text.split('-').collect();
+
+                        for (index, part) in parts.iter().enumerate() {
+                            let part_str: &str = *part;
+                            let is_current = part_str.contains('[');
+                            let space_num = part_str.replace('[', "").replace(']', "");
+
+                            let space_button = Button::builder()
+                                .label(&space_num)
+                                .width_request(28)
+                                .height_request(28)
+                                .build();
+
+                            if is_current {
+                                space_button.add_css_class("space-button-current");
+                            } else {
+                                space_button.add_css_class("space-button");
+                            }
+
+                            // Connect click handler
+                            let target_index = index;
+                            space_button.connect_clicked(move |_| {
+                                info!("Space button {} clicked, switching to space {}", space_num, target_index);
+
+                                std::thread::spawn(move || {
+                                    use std::io::{Write, Read};
+
+                                    let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                        .map(|d| format!("{}/space-manager.sock", d))
+                                        .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                        let cmd = serde_json::json!({"SwitchTo": target_index});
+                                        if let Ok(data) = serde_json::to_vec(&cmd) {
+                                            let len = (data.len() as u32).to_le_bytes();
+                                            let _ = stream.write_all(&len);
+                                            let _ = stream.write_all(&data);
+                                            let _ = stream.flush();
+
+                                            let mut len_bytes = [0u8; 4];
+                                            if stream.read_exact(&mut len_bytes).is_ok() {
+                                                let response_len = u32::from_le_bytes(len_bytes) as usize;
+                                                let mut response_data = vec![0u8; response_len];
+                                                if stream.read_exact(&mut response_data).is_ok() {
+                                                    if let Ok(response) = serde_json::from_slice::<serde_json::Value>(&response_data) {
+                                                        info!("Switch response: {:?}", response);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+
+                            space_button.set_cursor_from_name(Some("pointer"));
+                            spaces_box_clone.append(&space_button);
+                        }
+
+                        last_text = current_text;
+                    }
+
+                    glib::ControlFlow::Continue
+                });
 
                 // Add CSS styling
                 let css_provider = gtk4::CssProvider::new();
@@ -627,12 +786,6 @@ impl OverlayManager {
                     "window {
                         background-color: rgba(30, 30, 30, 0.95);
                         border-radius: 6px;
-                    }
-                    label {
-                        color: white;
-                        font-size: 14px;
-                        font-family: monospace;
-                        font-weight: bold;
                     }
                     button {
                         background: transparent;
@@ -652,6 +805,25 @@ impl OverlayManager {
                     }
                     button:active {
                         background: rgba(255, 255, 255, 0.15);
+                    }
+                    button.space-button {
+                        color: #aaaaaa;
+                        font-size: 14px;
+                        font-weight: normal;
+                    }
+                    button.space-button:hover {
+                        color: #ffffff;
+                        background: rgba(255, 255, 255, 0.15);
+                    }
+                    button.space-button-current {
+                        color: #ffffff;
+                        font-size: 14px;
+                        font-weight: bold;
+                        background: rgba(100, 150, 255, 0.3);
+                        border: 1px solid rgba(100, 150, 255, 0.5);
+                    }
+                    button.space-button-current:hover {
+                        background: rgba(100, 150, 255, 0.4);
                     }
                     button.close-button {
                         font-size: 14px;
@@ -697,16 +869,6 @@ impl OverlayManager {
 
                 window.set_child(Some(&hbox));
 
-                // Update label periodically
-                let label_clone = label.clone();
-                let label_text_clone = label_text.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let text = glib::MainContext::default().block_on(async {
-                        label_text_clone.read().await.clone()
-                    });
-                    label_clone.set_text(&text);
-                    glib::ControlFlow::Continue
-                });
 
                 window.present();
                 info!("GTK overlay window created and shown");
@@ -742,12 +904,12 @@ impl Default for OverlayManager {
 fn show_settings_dialog(app: &Application) {
     info!("Creating settings dialog");
 
-    // Load current settings from state.json
-    let state_file = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".space-manager").join("state.json"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.space-manager/state.json"));
+    // Load current settings from config.json
+    let config_file = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".space-manager").join("config.json"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.space-manager/config.json"));
 
-    let settings = if let Ok(content) = std::fs::read_to_string(&state_file) {
+    let settings = if let Ok(content) = std::fs::read_to_string(&config_file) {
         serde_json::from_str::<serde_json::Value>(&content).ok()
     } else {
         None
@@ -935,8 +1097,7 @@ fn show_settings_dialog(app: &Application) {
     });
 
     // Apply button handler (save and reload without closing dialog)
-    let state_file_clone1 = state_file.clone();
-    let settings_clone1 = settings.clone();
+    let config_file_clone1 = config_file.clone();
     let side_mouse_check_clone1 = side_mouse_check.clone();
     let overlay_enabled_check_clone1 = overlay_enabled_check.clone();
     let from_area_combo_clone1 = from_area_combo.clone();
@@ -950,8 +1111,8 @@ fn show_settings_dialog(app: &Application) {
     apply_button.connect_clicked(move |_| {
         info!("Applying settings...");
 
-        // Read all form values
-        let new_settings = serde_json::json!({
+        // Read all form values and create config structure
+        let config_settings = serde_json::json!({
             "side_mouse_binds": side_mouse_check_clone1.is_active(),
             "overlay": {
                 "enabled": overlay_enabled_check_clone1.is_active(),
@@ -969,22 +1130,9 @@ fn show_settings_dialog(app: &Application) {
             }
         });
 
-        // Merge with existing settings (preserve windows and current)
-        let mut final_settings = if let Some(existing) = &settings_clone1 {
-            existing.clone()
-        } else {
-            serde_json::json!({})
-        };
-
-        if let Some(obj) = final_settings.as_object_mut() {
-            obj.insert("side_mouse_binds".to_string(), new_settings["side_mouse_binds"].clone());
-            obj.insert("overlay".to_string(), new_settings["overlay"].clone());
-            obj.insert("mouse".to_string(), new_settings["mouse"].clone());
-        }
-
-        // Save to file
-        if let Ok(content) = serde_json::to_string_pretty(&final_settings) {
-            if let Err(e) = std::fs::write(&state_file_clone1, content) {
+        // Save to config file
+        if let Ok(content) = serde_json::to_string_pretty(&config_settings) {
+            if let Err(e) = std::fs::write(&config_file_clone1, content) {
                 error!("Failed to save settings: {}", e);
                 return;
             } else {
@@ -1034,12 +1182,13 @@ fn show_settings_dialog(app: &Application) {
     });
 
     // Save button handler (save, reload, and close dialog)
+    let config_file_clone2 = config_file.clone();
     let dialog_clone2 = dialog.clone();
     save_button.connect_clicked(move |_| {
         info!("Saving settings...");
 
-        // Read all form values
-        let new_settings = serde_json::json!({
+        // Read all form values and create config structure
+        let config_settings = serde_json::json!({
             "side_mouse_binds": side_mouse_check.is_active(),
             "overlay": {
                 "enabled": overlay_enabled_check.is_active(),
@@ -1057,22 +1206,9 @@ fn show_settings_dialog(app: &Application) {
             }
         });
 
-        // Merge with existing settings (preserve windows and current)
-        let mut final_settings = if let Some(existing) = &settings {
-            existing.clone()
-        } else {
-            serde_json::json!({})
-        };
-
-        if let Some(obj) = final_settings.as_object_mut() {
-            obj.insert("side_mouse_binds".to_string(), new_settings["side_mouse_binds"].clone());
-            obj.insert("overlay".to_string(), new_settings["overlay"].clone());
-            obj.insert("mouse".to_string(), new_settings["mouse"].clone());
-        }
-
-        // Save to file
-        if let Ok(content) = serde_json::to_string_pretty(&final_settings) {
-            if let Err(e) = std::fs::write(&state_file, content) {
+        // Save to config file
+        if let Ok(content) = serde_json::to_string_pretty(&config_settings) {
+            if let Err(e) = std::fs::write(&config_file_clone2, content) {
                 error!("Failed to save settings: {}", e);
                 return;
             } else {

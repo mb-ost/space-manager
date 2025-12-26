@@ -339,6 +339,43 @@ impl Daemon {
                     }
                 }
             }
+            Command::SwitchTo(target_index) => {
+                info!("Switching to window at index {}", target_index);
+                
+                // Set the current index to the target
+                if let Some(window) = self.manager.switch_to(target_index).await {
+                    // Check if window is closed (no PID)
+                    if !window.is_open() {
+                        info!("Opening closed window: {}", window.spawn_command);
+                        match self.launcher.spawn(window.spawn_command.clone()).await {
+                            Ok(_) => {
+                                info!("Spawned closed window, waiting for it to open...");
+                                return Response::Ok;
+                            }
+                            Err(e) => {
+                                error!("Failed to spawn closed window: {}", e);
+                                return Response::Error(format!("Failed to open window: {}", e));
+                            }
+                        }
+                    }
+
+                    // Show the target window, hide all others
+                    if let Err(e) = self.update_visibility(&window.address).await {
+                        error!("Failed to update visibility: {}", e);
+                        return Response::Error(format!("Failed to switch: {}", e));
+                    }
+
+                    // Update overlay
+                    self.update_overlay().await;
+
+                    // Schedule saving current window after 5 seconds
+                    self.schedule_save_current().await;
+
+                    Response::Ok
+                } else {
+                    Response::Error(format!("Invalid window index: {}", target_index))
+                }
+            }
             Command::List => {
                 let windows = self.manager.get_windows().await;
                 Response::Windows(windows)

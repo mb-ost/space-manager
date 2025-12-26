@@ -60,6 +60,7 @@ impl ManagedWindow {
 pub enum Command {
     Next,
     Prev,
+    SwitchTo(usize),  // Switch to window at specific index
     Spawn(String),
     List,
     Cleanup,  // Close all windows in special:spaces

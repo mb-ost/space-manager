@@ -7,9 +7,13 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StateFile {
+struct WindowState {
     windows: Vec<ManagedWindow>,
     current: Option<String>,  // ID of the current window
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigFile {
     #[serde(default = "default_side_mouse_binds")]
     side_mouse_binds: bool,
     #[serde(default = "default_overlay_config")]
@@ -80,6 +84,7 @@ pub struct SpaceManager {
     windows: Arc<RwLock<Vec<ManagedWindow>>>,
     current_index: Arc<RwLock<usize>>,
     state_file: PathBuf,
+    config_file: PathBuf,
     side_mouse_binds: Arc<RwLock<bool>>,
     overlay_config: Arc<RwLock<OverlayConfig>>,
     mouse_config: Arc<RwLock<MouseConfig>>,
@@ -88,10 +93,12 @@ pub struct SpaceManager {
 impl SpaceManager {
     pub fn new() -> Self {
         let state_file = Self::get_state_file_path();
+        let config_file = Self::get_config_file_path();
         Self {
             windows: Arc::new(RwLock::new(Vec::new())),
             current_index: Arc::new(RwLock::new(0)),
             state_file,
+            config_file,
             side_mouse_binds: Arc::new(RwLock::new(true)),
             overlay_config: Arc::new(RwLock::new(default_overlay_config())),
             mouse_config: Arc::new(RwLock::new(default_mouse_config())),
@@ -103,35 +110,49 @@ impl SpaceManager {
         PathBuf::from(home).join(".space-manager").join("state.json")
     }
 
+    fn get_config_file_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
+        PathBuf::from(home).join(".space-manager").join("config.json")
+    }
+
     /// Load state from disk (all windows loaded as closed - PID will be None)
     pub async fn load_state(&self) -> Result<()> {
+        // Load config from config.json
+        if self.config_file.exists() {
+            let content = tokio::fs::read_to_string(&self.config_file).await?;
+            let config: ConfigFile = serde_json::from_str(&content)?;
+
+            // Load side_mouse_binds setting
+            let mut side_mouse_binds = self.side_mouse_binds.write().await;
+            *side_mouse_binds = config.side_mouse_binds;
+            info!("Loaded side_mouse_binds setting: {}", config.side_mouse_binds);
+
+            // Load overlay config
+            let mut overlay_config = self.overlay_config.write().await;
+            *overlay_config = config.overlay;
+            info!("Loaded overlay config: enabled={}, offset=({}, {})",
+                  overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
+
+            // Load mouse config
+            let mut mouse_config = self.mouse_config.write().await;
+            *mouse_config = config.mouse;
+            info!("Loaded mouse config: fraction={}, min_px={}",
+                  mouse_config.change_area_fraction, mouse_config.min_change_area_px);
+        } else {
+            info!("No config file found at {:?}, using defaults", self.config_file);
+        }
+
+        // Load window state from state.json
         if !self.state_file.exists() {
             info!("No saved state found at {:?}", self.state_file);
             return Ok(());
         }
 
         let content = tokio::fs::read_to_string(&self.state_file).await?;
-        let state: StateFile = serde_json::from_str(&content)?;
+        let state: WindowState = serde_json::from_str(&content)?;
 
         let mut windows = self.windows.write().await;
         *windows = state.windows;
-
-        // Load side_mouse_binds setting
-        let mut side_mouse_binds = self.side_mouse_binds.write().await;
-        *side_mouse_binds = state.side_mouse_binds;
-        info!("Loaded side_mouse_binds setting: {}", state.side_mouse_binds);
-
-        // Load overlay config
-        let mut overlay_config = self.overlay_config.write().await;
-        *overlay_config = state.overlay;
-        info!("Loaded overlay config: enabled={}, offset=({}, {})",
-              overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
-
-        // Load mouse config
-        let mut mouse_config = self.mouse_config.write().await;
-        *mouse_config = state.mouse;
-        info!("Loaded mouse config: fraction={}, min_px={}",
-              mouse_config.change_area_fraction, mouse_config.min_change_area_px);
 
         // Set current index based on saved current window ID
         if let Some(current_id) = state.current {
@@ -156,9 +177,6 @@ impl SpaceManager {
 
         let windows = self.windows.read().await;
         let current_index = *self.current_index.read().await;
-        let side_mouse_binds = *self.side_mouse_binds.read().await;
-        let overlay_config = self.overlay_config.read().await.clone();
-        let mouse_config = self.mouse_config.read().await.clone();
 
         // Get current window ID
         let current_id = if current_index < windows.len() {
@@ -167,18 +185,39 @@ impl SpaceManager {
             None
         };
 
-        let state = StateFile {
+        let state = WindowState {
             windows: windows.clone(),
             current: current_id,
-            side_mouse_binds,
-            overlay: overlay_config,
-            mouse: mouse_config,
         };
 
         let content = serde_json::to_string_pretty(&state)?;
         tokio::fs::write(&self.state_file, content).await?;
 
         info!("Saved {} windows to state file", windows.len());
+        Ok(())
+    }
+
+    /// Save config to disk
+    pub async fn save_config(&self) -> Result<()> {
+        // Create directory if it doesn't exist
+        if let Some(parent) = self.config_file.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let side_mouse_binds = *self.side_mouse_binds.read().await;
+        let overlay_config = self.overlay_config.read().await.clone();
+        let mouse_config = self.mouse_config.read().await.clone();
+
+        let config = ConfigFile {
+            side_mouse_binds,
+            overlay: overlay_config,
+            mouse: mouse_config,
+        };
+
+        let content = serde_json::to_string_pretty(&config)?;
+        tokio::fs::write(&self.config_file, content).await?;
+
+        info!("Saved configuration to config file");
         Ok(())
     }
 
@@ -194,31 +233,31 @@ impl SpaceManager {
         self.mouse_config.read().await.clone()
     }
 
-    /// Reload configuration from state.json without restarting
+    /// Reload configuration from config.json without restarting
     pub async fn reload_config(&self) -> Result<()> {
-        info!("Reloading configuration from state.json");
+        info!("Reloading configuration from config.json");
 
-        if !self.state_file.exists() {
-            return Err(anyhow::anyhow!("State file not found"));
+        if !self.config_file.exists() {
+            return Err(anyhow::anyhow!("Config file not found"));
         }
 
-        let content = tokio::fs::read_to_string(&self.state_file).await?;
-        let state: StateFile = serde_json::from_str(&content)?;
+        let content = tokio::fs::read_to_string(&self.config_file).await?;
+        let config: ConfigFile = serde_json::from_str(&content)?;
 
         // Reload side_mouse_binds setting
         let mut side_mouse_binds = self.side_mouse_binds.write().await;
-        *side_mouse_binds = state.side_mouse_binds;
-        info!("Reloaded side_mouse_binds setting: {}", state.side_mouse_binds);
+        *side_mouse_binds = config.side_mouse_binds;
+        info!("Reloaded side_mouse_binds setting: {}", config.side_mouse_binds);
 
         // Reload overlay config
         let mut overlay_config = self.overlay_config.write().await;
-        *overlay_config = state.overlay;
+        *overlay_config = config.overlay;
         info!("Reloaded overlay config: enabled={}, offset=({}, {})",
               overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
 
         // Reload mouse config
         let mut mouse_config = self.mouse_config.write().await;
-        *mouse_config = state.mouse;
+        *mouse_config = config.mouse;
         info!("Reloaded mouse config: fraction={}, min_px={}",
               mouse_config.change_area_fraction, mouse_config.min_change_area_px);
 
@@ -301,6 +340,17 @@ impl SpaceManager {
         } else {
             *current -= 1;
         }
+        Some(windows[*current].clone())
+    }
+
+    pub async fn switch_to(&self, index: usize) -> Option<ManagedWindow> {
+        let windows = self.windows.read().await;
+        if index >= windows.len() {
+            return None;
+        }
+
+        let mut current = self.current_index.write().await;
+        *current = index;
         Some(windows[*current].clone())
     }
 
