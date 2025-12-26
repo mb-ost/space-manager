@@ -12,6 +12,39 @@ use super::theme;
 use super::window_utils;
 use super::dialog_utils;
 
+/// Helper function to get the current follow_mouse setting value
+fn get_follow_mouse_setting() -> i64 {
+    let follow_mouse_output = std::process::Command::new("hyprctl")
+        .arg("getoption")
+        .arg("input:follow_mouse")
+        .arg("-j")
+        .output()
+        .ok();
+
+    follow_mouse_output
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+        .and_then(|json| json["int"].as_i64())
+        .unwrap_or(1)
+}
+
+/// Helper function to set the follow_mouse setting
+fn set_follow_mouse(value: i64) {
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("input:follow_mouse")
+        .arg(format!("{}", value))
+        .output();
+    info!("Set follow_mouse to: {}", value);
+}
+
+/// Helper function to restore follow_mouse setting after a delay
+fn restore_follow_mouse_after_delay(original_value: i64, delay_ms: u64) {
+    glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
+        set_follow_mouse(original_value);
+        info!("Restored follow_mouse to: {}", original_value);
+    });
+}
+
 pub struct OverlayManager {
     label_text: Arc<RwLock<String>>,
     pub window_created: Arc<RwLock<bool>>,
@@ -1280,12 +1313,9 @@ fn show_settings_dialog(app: &Application) {
     apply_button.connect_clicked(move |_| {
         info!("Applying settings...");
 
-        // Disable follow_mouse to prevent focus from changing if mouse moves during resize
-        let _ = std::process::Command::new("hyprctl")
-            .arg("keyword")
-            .arg("input:follow_mouse")
-            .arg("0")
-            .output();
+        // Get original follow_mouse setting and disable it
+        let original_follow_mouse = get_follow_mouse_setting();
+        set_follow_mouse(0);
 
         // Read existing config to preserve templates
         let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone1) {
@@ -1326,6 +1356,9 @@ fn show_settings_dialog(app: &Application) {
 
         // Send reload config command via IPC using centralized helper
         ipc_helpers::reload_config();
+
+        // Restore follow_mouse setting after giving time for resize to complete
+        restore_follow_mouse_after_delay(original_follow_mouse, 500);
     });
 
     // Save button handler (save, reload, and close dialog)
@@ -1334,12 +1367,9 @@ fn show_settings_dialog(app: &Application) {
     save_button.connect_clicked(move |_| {
         info!("Saving settings...");
 
-        // Disable follow_mouse to prevent focus from changing if mouse moves during resize
-        let _ = std::process::Command::new("hyprctl")
-            .arg("keyword")
-            .arg("input:follow_mouse")
-            .arg("0")
-            .output();
+        // Get original follow_mouse setting and disable it
+        let original_follow_mouse = get_follow_mouse_setting();
+        set_follow_mouse(0);
 
         // Read existing config to preserve templates
         let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone2) {
@@ -1380,6 +1410,9 @@ fn show_settings_dialog(app: &Application) {
 
         // Send reload config command via IPC using centralized helper
         ipc_helpers::reload_config();
+
+        // Restore follow_mouse setting after giving time for resize to complete
+        restore_follow_mouse_after_delay(original_follow_mouse, 500);
 
         dialog_clone2.close();
     });
