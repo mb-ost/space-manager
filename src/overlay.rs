@@ -580,6 +580,7 @@ impl OverlayManager {
 
                 let popover = gtk4::PopoverMenu::builder()
                     .menu_model(&menu)
+                    .has_arrow(false)
                     .build();
 
                 menu_button.set_popover(Some(&popover));
