@@ -341,7 +341,7 @@ impl Daemon {
             }
             Command::SwitchTo(target_index) => {
                 info!("Switching to window at index {}", target_index);
-                
+
                 // Set the current index to the target
                 if let Some(window) = self.manager.switch_to(target_index).await {
                     // Check if window is closed (no PID)
@@ -374,6 +374,48 @@ impl Daemon {
                     Response::Ok
                 } else {
                     Response::Error(format!("Invalid window index: {}", target_index))
+                }
+            }
+            Command::SwapWindows(index1, index2) => {
+                info!("Swapping windows at indices {} and {}", index1, index2);
+                
+                match self.manager.swap_windows(index1, index2).await {
+                    Ok(_) => {
+                        // Save the updated window order
+                        if let Err(e) = self.manager.save_state().await {
+                            error!("Failed to save state after swap: {}", e);
+                        }
+                        
+                        // Update overlay to reflect new order
+                        self.update_overlay().await;
+                        
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to swap windows: {}", e);
+                        Response::Error(format!("Failed to swap: {}", e))
+                    }
+                }
+            }
+            Command::SetWindowIcon(index, icon) => {
+                info!("Setting icon for window {} to: {}", index, icon);
+                
+                match self.manager.set_window_icon(index, icon).await {
+                    Ok(_) => {
+                        // Save the updated icon
+                        if let Err(e) = self.manager.save_state().await {
+                            error!("Failed to save state after icon change: {}", e);
+                        }
+                        
+                        // Update overlay to show new icon
+                        self.update_overlay().await;
+                        
+                        Response::Ok
+                    }
+                    Err(e) => {
+                        error!("Failed to set icon: {}", e);
+                        Response::Error(format!("Failed to set icon: {}", e))
+                    }
                 }
             }
             Command::List => {
@@ -801,6 +843,9 @@ impl Daemon {
             let change_area_fraction = overlay_config.change_area_fraction;
             let min_change_area_px = overlay_config.min_change_area_px;
             let from_area = overlay_config.from_area.clone();
+            
+            // Get window data for custom icons
+            let windows = self.manager.get_windows().await;
 
             info!("Spawning overlay task");
             tokio::spawn(async move {
@@ -808,6 +853,7 @@ impl Daemon {
                 overlay.show_spaces_indicator(
                     current_index,
                     total,
+                    &windows,
                     &from,
                     offset_x,
                     offset_y,

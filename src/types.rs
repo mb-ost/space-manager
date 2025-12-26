@@ -12,6 +12,8 @@ pub struct ManagedWindow {
     #[serde(skip)]
     pub pid: Option<u32>,  // PID - if Some, window is open; if None, window is closed/virtual
     pub spawn_command: String,  // The command to spawn/respawn this window
+    #[serde(default)]
+    pub custom_icon: Option<String>,  // Custom icon/emoji for the button
 }
 
 impl ManagedWindow {
@@ -31,6 +33,7 @@ impl ManagedWindow {
             title: String::from("(Not loaded)"),
             pid: None,
             spawn_command: command,
+            custom_icon: None,
         }
     }
 
@@ -61,6 +64,8 @@ pub enum Command {
     Next,
     Prev,
     SwitchTo(usize),  // Switch to window at specific index
+    SwapWindows(usize, usize),  // Swap two windows by index
+    SetWindowIcon(usize, String),  // Set custom icon/label for a window
     Spawn(String),
     List,
     Cleanup,  // Close all windows in special:spaces

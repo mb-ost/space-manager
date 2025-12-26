@@ -38,7 +38,7 @@ impl OverlayManager {
     }
 
     /// Show persistent space indicator overlay (1-2-3-[4]-5-6)
-    pub async fn show_spaces_indicator(&self, current: usize, total: usize, from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str, tracked_window_address: Option<&str>) {
+    pub async fn show_spaces_indicator(&self, current: usize, total: usize, windows: &[crate::types::ManagedWindow], from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str, tracked_window_address: Option<&str>) {
         info!("show_spaces_indicator called: current={}, total={}, from={}, offset=({}, {}), overlay_size={}", current, total, from, offset_x, offset_y, overlay_size);
 
         // Create config for this call
@@ -88,8 +88,8 @@ impl OverlayManager {
         // Store the new config
         *self.current_config.write().await = Some(new_config);
 
-        // Generate the indicator text like "1-2-3-[4]-5-6"
-        let text = self.generate_indicator_text(current, total);
+        // Generate the indicator text like "1-2-3-[4]-5-6" or with custom icons
+        let text = self.generate_indicator_text(current, windows);
         info!("Spaces indicator text: {}", text);
 
         // Update the label text
@@ -427,13 +427,17 @@ impl OverlayManager {
         self.hide_overlay().await;
     }
 
-    fn generate_indicator_text(&self, current: usize, total: usize) -> String {
+    fn generate_indicator_text(&self, current: usize, windows: &[crate::types::ManagedWindow]) -> String {
         let mut parts = Vec::new();
-        for i in 0..total {
+        for (i, window) in windows.iter().enumerate() {
+            let label = window.custom_icon.as_ref()
+                .map(|s| s.clone())
+                .unwrap_or_else(|| (i + 1).to_string());
+
             if i == current {
-                parts.push(format!("[{}]", i + 1));
+                parts.push(format!("[{}]", label));
             } else {
-                parts.push(format!("{}", i + 1));
+                parts.push(label);
             }
         }
         parts.join("-")
@@ -598,7 +602,15 @@ impl OverlayManager {
                 // Create horizontal box for space buttons
                 let spaces_box = GtkBox::new(Orientation::Horizontal, 4);
                 spaces_box.set_halign(gtk4::Align::Center);
-                spaces_box.set_hexpand(true);
+
+                // Wrap the spaces box in a scrolled window for horizontal scrolling
+                let scrolled_window = gtk4::ScrolledWindow::builder()
+                    .hscrollbar_policy(gtk4::PolicyType::Automatic)
+                    .vscrollbar_policy(gtk4::PolicyType::Never)
+                    .hexpand(true)
+                    .propagate_natural_width(true)
+                    .build();
+                scrolled_window.set_child(Some(&spaces_box));
 
                 // We need to get the label text synchronously, so we'll use a blocking approach
                 // In GTK context, we can use the current text value
@@ -610,14 +622,8 @@ impl OverlayManager {
                     })
                 };
 
-                // Extract parts and create buttons
-                let parts: Vec<&str> = text.split('-').collect();
-
-                for (index, part) in parts.iter().enumerate() {
-                    let part_str: &str = *part;
-                    let is_current = part_str.contains('[');
-                    let space_num = part_str.replace('[', "").replace(']', "");
-
+                // Helper function to create a space button with all handlers
+                let create_space_button = |index: usize, space_num: String, is_current: bool, total_spaces: usize| -> Button {
                     let space_button = Button::builder()
                         .label(&space_num)
                         .width_request(28)
@@ -630,12 +636,12 @@ impl OverlayManager {
                         space_button.add_css_class("space-button");
                     }
 
-                    // Connect click handler to switch to this space
+                    // Connect left-click handler
                     let target_index = index;
+                    let space_num_clone = space_num.clone();
                     space_button.connect_clicked(move |_| {
-                        info!("Space button {} clicked, switching to space {}", space_num, target_index);
+                        info!("Space button {} clicked, switching to space {}", space_num_clone, target_index);
 
-                        // Send switch command via IPC
                         std::thread::spawn(move || {
                             use std::io::{Write, Read};
 
@@ -644,7 +650,6 @@ impl OverlayManager {
                                 .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
 
                             if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
-                                // Send SwitchTo command with the target index
                                 let cmd = serde_json::json!({"SwitchTo": target_index});
                                 if let Ok(data) = serde_json::to_vec(&cmd) {
                                     let len = (data.len() as u32).to_le_bytes();
@@ -652,7 +657,6 @@ impl OverlayManager {
                                     let _ = stream.write_all(&data);
                                     let _ = stream.flush();
 
-                                    // Read response (optional)
                                     let mut len_bytes = [0u8; 4];
                                     if stream.read_exact(&mut len_bytes).is_ok() {
                                         let response_len = u32::from_le_bytes(len_bytes) as usize;
@@ -670,9 +674,196 @@ impl OverlayManager {
                         });
                     });
 
-                    // Set cursor to pointer for buttons
+                    // Add right-click context menu
+                    let gesture = gtk4::GestureClick::new();
+                    gesture.set_button(3); // Right mouse button
+
+                    let space_button_clone = space_button.clone();
+                    let context_index = index;
+                    gesture.connect_pressed(move |gesture, _, _x, _y| {
+                        info!("Right-click on space button {}", context_index);
+
+                        // Create context menu
+                        let popover = gtk4::Popover::new();
+                        popover.set_has_arrow(false);
+                        popover.set_parent(&space_button_clone);
+
+                        let menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+
+                        // Move Left option
+                        if context_index > 0 {
+                            let move_left_btn = Button::with_label("← Move Left");
+                            move_left_btn.add_css_class("context-menu-item");
+                            move_left_btn.set_cursor_from_name(Some("pointer"));
+
+                            let popover_clone = popover.clone();
+                            move_left_btn.connect_clicked(move |_| {
+                                info!("Move left clicked for index {}", context_index);
+                                popover_clone.popdown();
+
+                                std::thread::spawn(move || {
+                                    use std::io::Write;
+                                    let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                        .map(|d| format!("{}/space-manager.sock", d))
+                                        .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                        let cmd = serde_json::json!({"SwapWindows": [context_index, context_index - 1]});
+                                        if let Ok(data) = serde_json::to_vec(&cmd) {
+                                            let len = (data.len() as u32).to_le_bytes();
+                                            let _ = stream.write_all(&len);
+                                            let _ = stream.write_all(&data);
+                                            let _ = stream.flush();
+                                        }
+                                    }
+                                });
+                            });
+                            menu_box.append(&move_left_btn);
+                        }
+
+                        // Move Right option
+                        if context_index < total_spaces - 1 {
+                            let move_right_btn = Button::with_label("Move Right →");
+                            move_right_btn.add_css_class("context-menu-item");
+                            move_right_btn.set_cursor_from_name(Some("pointer"));
+
+                            let popover_clone = popover.clone();
+                            move_right_btn.connect_clicked(move |_| {
+                                info!("Move right clicked for index {}", context_index);
+                                popover_clone.popdown();
+
+                                std::thread::spawn(move || {
+                                    use std::io::Write;
+                                    let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                        .map(|d| format!("{}/space-manager.sock", d))
+                                        .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                        let cmd = serde_json::json!({"SwapWindows": [context_index, context_index + 1]});
+                                        if let Ok(data) = serde_json::to_vec(&cmd) {
+                                            let len = (data.len() as u32).to_le_bytes();
+                                            let _ = stream.write_all(&len);
+                                            let _ = stream.write_all(&data);
+                                            let _ = stream.flush();
+                                        }
+                                    }
+                                });
+                            });
+                            menu_box.append(&move_right_btn);
+                        }
+
+                        // Change Icon option
+                        let change_icon_btn = Button::with_label("✏ Change Icon");
+                        change_icon_btn.add_css_class("context-menu-item");
+                        change_icon_btn.set_cursor_from_name(Some("pointer"));
+
+                        let popover_clone = popover.clone();
+                        change_icon_btn.connect_clicked(move |_| {
+                            info!("Change icon clicked for index {}", context_index);
+                            popover_clone.popdown();
+
+                            // Create dialog to get new icon
+                            let dialog = gtk4::Window::builder()
+                                .title("Change Space Icon")
+                                .default_width(300)
+                                .default_height(150)
+                                .modal(true)
+                                .build();
+
+                            // Add float and center rules for this dialog
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                let _ = std::process::Command::new("hyprctl")
+                                    .arg("keyword")
+                                    .arg("windowrulev2")
+                                    .arg("float,title:^(Change Space Icon)$")
+                                    .output();
+                                let _ = std::process::Command::new("hyprctl")
+                                    .arg("keyword")
+                                    .arg("windowrulev2")
+                                    .arg("center,title:^(Change Space Icon)$")
+                                    .output();
+                            });
+
+                            let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                            vbox.set_margin_start(20);
+                            vbox.set_margin_end(20);
+                            vbox.set_margin_top(20);
+                            vbox.set_margin_bottom(20);
+
+                            let label = gtk4::Label::new(Some("Enter icon (emoji or text):"));
+                            let entry = gtk4::Entry::new();
+                            entry.set_placeholder_text(Some("e.g. 🌐 or Web"));
+
+                            let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+                            button_box.set_halign(gtk4::Align::End);
+
+                            let cancel_btn = Button::with_label("Cancel");
+                            let dialog_clone = dialog.clone();
+                            cancel_btn.connect_clicked(move |_| {
+                                dialog_clone.close();
+                            });
+
+                            let ok_btn = Button::with_label("OK");
+                            ok_btn.add_css_class("suggested-action");
+                            let entry_clone = entry.clone();
+                            let dialog_clone2 = dialog.clone();
+                            ok_btn.connect_clicked(move |_| {
+                                let new_icon = entry_clone.text().to_string();
+                                dialog_clone2.close();
+
+                                std::thread::spawn(move || {
+                                    use std::io::Write;
+                                    let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                        .map(|d| format!("{}/space-manager.sock", d))
+                                        .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                        let cmd = serde_json::json!({"SetWindowIcon": [context_index, new_icon]});
+                                        if let Ok(data) = serde_json::to_vec(&cmd) {
+                                            let len = (data.len() as u32).to_le_bytes();
+                                            let _ = stream.write_all(&len);
+                                            let _ = stream.write_all(&data);
+                                            let _ = stream.flush();
+                                        }
+                                    }
+                                });
+                            });
+
+                            button_box.append(&cancel_btn);
+                            button_box.append(&ok_btn);
+
+                            vbox.append(&label);
+                            vbox.append(&entry);
+                            vbox.append(&button_box);
+
+                            dialog.set_child(Some(&vbox));
+                            dialog.present();
+                        });
+                        menu_box.append(&change_icon_btn);
+
+                        popover.set_child(Some(&menu_box));
+                        popover.popup();
+
+                        gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    });
+
+                    space_button.add_controller(gesture);
                     space_button.set_cursor_from_name(Some("pointer"));
 
+                    space_button
+                };
+
+                // Extract parts and create initial buttons
+                let parts: Vec<&str> = text.split('-').collect();
+                let total_spaces = parts.len();
+
+                for (index, part) in parts.iter().enumerate() {
+                    let part_str: &str = *part;
+                    let is_current = part_str.contains('[');
+                    let space_num = part_str.replace('[', "").replace(']', "");
+
+                    let space_button = create_space_button(index, space_num, is_current, total_spaces);
                     spaces_box.append(&space_button);
                 }
 
@@ -695,7 +886,7 @@ impl OverlayManager {
                 });
 
                 hbox.append(&menu_button);
-                hbox.append(&spaces_box);
+                hbox.append(&scrolled_window);
                 hbox.append(&close_button);
 
                 // Update buttons periodically when text changes
@@ -717,6 +908,7 @@ impl OverlayManager {
 
                         // Recreate buttons with new state
                         let parts: Vec<&str> = current_text.split('-').collect();
+                        let total_spaces = parts.len();
 
                         for (index, part) in parts.iter().enumerate() {
                             let part_str: &str = *part;
@@ -735,10 +927,11 @@ impl OverlayManager {
                                 space_button.add_css_class("space-button");
                             }
 
-                            // Connect click handler
+                            // Connect left-click handler
                             let target_index = index;
+                            let space_num_clone = space_num.clone();
                             space_button.connect_clicked(move |_| {
-                                info!("Space button {} clicked, switching to space {}", space_num, target_index);
+                                info!("Space button {} clicked, switching to space {}", space_num_clone, target_index);
 
                                 std::thread::spawn(move || {
                                     use std::io::{Write, Read};
@@ -770,6 +963,181 @@ impl OverlayManager {
                                 });
                             });
 
+                            // Add right-click context menu
+                            let gesture = gtk4::GestureClick::new();
+                            gesture.set_button(3); // Right mouse button
+
+                            let space_button_clone = space_button.clone();
+                            let context_index = index;
+                            gesture.connect_pressed(move |gesture, _, _x, _y| {
+                                info!("Right-click on space button {}", context_index);
+
+                                // Create context menu
+                                let popover = gtk4::Popover::new();
+                                popover.set_has_arrow(false);
+                                popover.set_parent(&space_button_clone);
+
+                                let menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+
+                                // Move Left option
+                                if context_index > 0 {
+                                    let move_left_btn = Button::with_label("← Move Left");
+                                    move_left_btn.add_css_class("context-menu-item");
+                                    move_left_btn.set_cursor_from_name(Some("pointer"));
+
+                                    let popover_clone = popover.clone();
+                                    move_left_btn.connect_clicked(move |_| {
+                                        info!("Move left clicked for index {}", context_index);
+                                        popover_clone.popdown();
+
+                                        std::thread::spawn(move || {
+                                            use std::io::Write;
+                                            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                                .map(|d| format!("{}/space-manager.sock", d))
+                                                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                                let cmd = serde_json::json!({"SwapWindows": [context_index, context_index - 1]});
+                                                if let Ok(data) = serde_json::to_vec(&cmd) {
+                                                    let len = (data.len() as u32).to_le_bytes();
+                                                    let _ = stream.write_all(&len);
+                                                    let _ = stream.write_all(&data);
+                                                    let _ = stream.flush();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    menu_box.append(&move_left_btn);
+                                }
+
+                                // Move Right option
+                                if context_index < total_spaces - 1 {
+                                    let move_right_btn = Button::with_label("Move Right →");
+                                    move_right_btn.add_css_class("context-menu-item");
+                                    move_right_btn.set_cursor_from_name(Some("pointer"));
+
+                                    let popover_clone = popover.clone();
+                                    move_right_btn.connect_clicked(move |_| {
+                                        info!("Move right clicked for index {}", context_index);
+                                        popover_clone.popdown();
+
+                                        std::thread::spawn(move || {
+                                            use std::io::Write;
+                                            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                                .map(|d| format!("{}/space-manager.sock", d))
+                                                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                                let cmd = serde_json::json!({"SwapWindows": [context_index, context_index + 1]});
+                                                if let Ok(data) = serde_json::to_vec(&cmd) {
+                                                    let len = (data.len() as u32).to_le_bytes();
+                                                    let _ = stream.write_all(&len);
+                                                    let _ = stream.write_all(&data);
+                                                    let _ = stream.flush();
+                                                }
+                                            }
+                                        });
+                                    });
+                                    menu_box.append(&move_right_btn);
+                                }
+
+                                // Change Icon option
+                                let change_icon_btn = Button::with_label("✏ Change Icon");
+                                change_icon_btn.add_css_class("context-menu-item");
+                                change_icon_btn.set_cursor_from_name(Some("pointer"));
+
+                                let popover_clone = popover.clone();
+                                change_icon_btn.connect_clicked(move |_| {
+                                    info!("Change icon clicked for index {}", context_index);
+                                    popover_clone.popdown();
+
+                                    // Create dialog to get new icon
+                                    let dialog = gtk4::Window::builder()
+                                        .title("Change Space Icon")
+                                        .default_width(300)
+                                        .default_height(150)
+                                        .modal(true)
+                                        .build();
+
+                                    // Add float and center rules for this dialog
+                                    std::thread::spawn(|| {
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                        let _ = std::process::Command::new("hyprctl")
+                                            .arg("keyword")
+                                            .arg("windowrulev2")
+                                            .arg("float,title:^(Change Space Icon)$")
+                                            .output();
+                                        let _ = std::process::Command::new("hyprctl")
+                                            .arg("keyword")
+                                            .arg("windowrulev2")
+                                            .arg("center,title:^(Change Space Icon)$")
+                                            .output();
+                                    });
+
+                                    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                                    vbox.set_margin_start(20);
+                                    vbox.set_margin_end(20);
+                                    vbox.set_margin_top(20);
+                                    vbox.set_margin_bottom(20);
+
+                                    let label = gtk4::Label::new(Some("Enter icon (emoji or text):"));
+                                    let entry = gtk4::Entry::new();
+                                    entry.set_placeholder_text(Some("e.g. 🌐 or Web"));
+
+                                    let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+                                    button_box.set_halign(gtk4::Align::End);
+
+                                    let cancel_btn = Button::with_label("Cancel");
+                                    let dialog_clone = dialog.clone();
+                                    cancel_btn.connect_clicked(move |_| {
+                                        dialog_clone.close();
+                                    });
+
+                                    let ok_btn = Button::with_label("OK");
+                                    ok_btn.add_css_class("suggested-action");
+                                    let entry_clone = entry.clone();
+                                    let dialog_clone2 = dialog.clone();
+                                    ok_btn.connect_clicked(move |_| {
+                                        let new_icon = entry_clone.text().to_string();
+                                        dialog_clone2.close();
+
+                                        std::thread::spawn(move || {
+                                            use std::io::Write;
+                                            let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                                .map(|d| format!("{}/space-manager.sock", d))
+                                                .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                                let cmd = serde_json::json!({"SetWindowIcon": [context_index, new_icon]});
+                                                if let Ok(data) = serde_json::to_vec(&cmd) {
+                                                    let len = (data.len() as u32).to_le_bytes();
+                                                    let _ = stream.write_all(&len);
+                                                    let _ = stream.write_all(&data);
+                                                    let _ = stream.flush();
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                    button_box.append(&cancel_btn);
+                                    button_box.append(&ok_btn);
+
+                                    vbox.append(&label);
+                                    vbox.append(&entry);
+                                    vbox.append(&button_box);
+
+                                    dialog.set_child(Some(&vbox));
+                                    dialog.present();
+                                });
+                                menu_box.append(&change_icon_btn);
+
+                                popover.set_child(Some(&menu_box));
+                                popover.popup();
+
+                                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                            });
+
+                            space_button.add_controller(gesture);
                             space_button.set_cursor_from_name(Some("pointer"));
                             spaces_box_clone.append(&space_button);
                         }
@@ -786,6 +1154,25 @@ impl OverlayManager {
                     "window {
                         background-color: rgba(30, 30, 30, 0.95);
                         border-radius: 6px;
+                    }
+                    scrolledwindow {
+                        background: transparent;
+                        border: none;
+                    }
+                    scrolledwindow > scrollbar {
+                        background: transparent;
+                        border: none;
+                        min-width: 4px;
+                        min-height: 4px;
+                    }
+                    scrolledwindow > scrollbar > slider {
+                        background: rgba(255, 255, 255, 0.2);
+                        border-radius: 2px;
+                        min-width: 4px;
+                        min-height: 4px;
+                    }
+                    scrolledwindow > scrollbar > slider:hover {
+                        background: rgba(255, 255, 255, 0.3);
                     }
                     button {
                         background: transparent;
@@ -856,6 +1243,19 @@ impl OverlayManager {
                         min-width: 100px;
                     }
                     popover modelbutton:hover {
+                        background-color: rgba(255, 255, 255, 0.1);
+                        color: #ffffff;
+                    }
+                    button.context-menu-item {
+                        background-color: transparent;
+                        color: #e0e0e0;
+                        border-radius: 0;
+                        padding: 8px 16px;
+                        min-width: 120px;
+                        font-size: 14px;
+                        text-align: left;
+                    }
+                    button.context-menu-item:hover {
                         background-color: rgba(255, 255, 255, 0.1);
                         color: #ffffff;
                     }"

@@ -377,6 +377,44 @@ impl SpaceManager {
         self.windows.read().await.len()
     }
 
+    /// Swap two windows by their indices
+    pub async fn swap_windows(&self, index1: usize, index2: usize) -> Result<()> {
+        let mut windows = self.windows.write().await;
+        
+        if index1 >= windows.len() || index2 >= windows.len() {
+            return Err(anyhow::anyhow!("Invalid window indices"));
+        }
+        
+        windows.swap(index1, index2);
+        
+        // Update current index if it was one of the swapped windows
+        let mut current = self.current_index.write().await;
+        if *current == index1 {
+            *current = index2;
+        } else if *current == index2 {
+            *current = index1;
+        }
+        
+        Ok(())
+    }
+
+    /// Set custom icon for a window
+    pub async fn set_window_icon(&self, index: usize, icon: String) -> Result<()> {
+        let mut windows = self.windows.write().await;
+        
+        if index >= windows.len() {
+            return Err(anyhow::anyhow!("Invalid window index"));
+        }
+        
+        windows[index].custom_icon = if icon.is_empty() {
+            None
+        } else {
+            Some(icon)
+        };
+        
+        Ok(())
+    }
+
     /// Find closed window by command and mark as open
     pub async fn open_window_by_command(&self, command: &str, address: String, class: String, title: String, pid: Option<u32>) -> bool {
         let mut windows = self.windows.write().await;
