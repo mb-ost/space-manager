@@ -353,6 +353,42 @@ impl SpaceManager {
         }
     }
 
+    /// Mark a window as closed without removing it from the list
+    pub async fn mark_window_closed(&self, address: &str) {
+        let mut windows = self.windows.write().await;
+        if let Some(window) = windows.iter_mut().find(|w| w.address == address) {
+            // Clear the address and PID to mark as closed but keep the window in the list
+            window.address = String::new();
+            window.pid = None;
+            info!("Marked window '{}' as closed", window.spawn_command);
+        }
+    }
+
+    /// Remove a window at a specific index
+    pub async fn remove_window_at_index(&self, index: usize) -> Option<String> {
+        let mut windows = self.windows.write().await;
+        if index >= windows.len() {
+            return None;
+        }
+
+        let window = windows.remove(index);
+        let address = window.address.clone();
+
+        // Adjust current index if necessary
+        let mut current = self.current_index.write().await;
+        if windows.is_empty() {
+            *current = 0;
+        } else if index < *current {
+            // Removed a window before the current one, decrement index
+            *current -= 1;
+        } else if *current >= windows.len() {
+            // Current index is past the end, wrap to last window
+            *current = windows.len() - 1;
+        }
+
+        Some(address)
+    }
+
     /// Find window by ID and mark as open
     pub async fn open_window_by_id(&self, id: &str, address: String, class: String, title: String, pid: Option<u32>) -> bool {
         let mut windows = self.windows.write().await;

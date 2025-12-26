@@ -855,6 +855,36 @@ impl OverlayManager {
                         });
                         menu_box.append(&change_icon_btn);
 
+                        // Close Space option
+                        let close_space_btn = Button::with_label("✕ Close Space");
+                        close_space_btn.add_css_class("context-menu-item");
+                        close_space_btn.add_css_class("destructive-action");
+                        close_space_btn.set_cursor_from_name(Some("pointer"));
+
+                        let popover_clone = popover.clone();
+                        close_space_btn.connect_clicked(move |_| {
+                            info!("Close space clicked for index {}", context_index);
+                            popover_clone.popdown();
+
+                            std::thread::spawn(move || {
+                                use std::io::Write;
+                                let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                    .map(|d| format!("{}/space-manager.sock", d))
+                                    .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                    let cmd = serde_json::json!({"CloseSpace": context_index});
+                                    if let Ok(data) = serde_json::to_vec(&cmd) {
+                                        let len = (data.len() as u32).to_le_bytes();
+                                        let _ = stream.write_all(&len);
+                                        let _ = stream.write_all(&data);
+                                        let _ = stream.flush();
+                                    }
+                                }
+                            });
+                        });
+                        menu_box.append(&close_space_btn);
+
                         popover.set_child(Some(&menu_box));
                         popover.popup();
 
@@ -1188,6 +1218,36 @@ impl OverlayManager {
                                     dialog.present();
                                 });
                                 menu_box.append(&change_icon_btn);
+
+                                // Close Space option
+                                let close_space_btn = Button::with_label("✕ Close Space");
+                                close_space_btn.add_css_class("context-menu-item");
+                                close_space_btn.add_css_class("destructive-action");
+                                close_space_btn.set_cursor_from_name(Some("pointer"));
+
+                                let popover_clone = popover.clone();
+                                close_space_btn.connect_clicked(move |_| {
+                                    info!("Close space clicked for index {}", context_index);
+                                    popover_clone.popdown();
+
+                                    std::thread::spawn(move || {
+                                        use std::io::Write;
+                                        let socket_path = std::env::var("XDG_RUNTIME_DIR")
+                                            .map(|d| format!("{}/space-manager.sock", d))
+                                            .unwrap_or_else(|_| "/tmp/space-manager.sock".to_string());
+
+                                        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                                            let cmd = serde_json::json!({"CloseSpace": context_index});
+                                            if let Ok(data) = serde_json::to_vec(&cmd) {
+                                                let len = (data.len() as u32).to_le_bytes();
+                                                let _ = stream.write_all(&len);
+                                                let _ = stream.write_all(&data);
+                                                let _ = stream.flush();
+                                            }
+                                        }
+                                    });
+                                });
+                                menu_box.append(&close_space_btn);
 
                                 popover.set_child(Some(&menu_box));
                                 popover.popup();

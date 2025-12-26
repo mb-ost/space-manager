@@ -524,6 +524,68 @@ impl Daemon {
                     }
                 }
             }
+            Command::CloseSpace(index) => {
+                info!("Closing space at index {}", index);
+
+                // Get the window at the specified index
+                let windows = self.manager.get_windows().await;
+                if index >= windows.len() {
+                    return Response::Error(format!("Invalid index: {}", index));
+                }
+
+                let window = &windows[index];
+                let address = window.address.clone();
+
+                // Close the window if it's open
+                if window.is_open() {
+                    info!("Closing window: {}", address);
+                    let _ = std::process::Command::new("hyprctl")
+                        .arg("dispatch")
+                        .arg("closewindow")
+                        .arg(format!("address:{}", address))
+                        .output();
+                }
+
+                // Remove the space from the list using the proper method
+                if let Some(_removed_addr) = self.manager.remove_window_at_index(index).await {
+                    info!("Removed space at index {}", index);
+
+                    // Save state
+                    if let Err(e) = self.manager.save_state().await {
+                        error!("Failed to save state after closing space: {}", e);
+                    }
+
+                    // If there are windows left, show the current one
+                    let windows = self.manager.get_windows().await;
+                    if !windows.is_empty() {
+                        if let Some(current_window) = self.manager.current_window().await {
+                            if current_window.is_open() {
+                                // Switch to the current window
+                                if let Err(e) = self.update_visibility(&current_window.address).await {
+                                    error!("Failed to switch to current window: {}", e);
+                                }
+                            } else {
+                                // Current window is closed, spawn it
+                                match self.launcher.spawn(current_window.spawn_command.clone(), Some(current_window.id.clone())).await {
+                                    Ok(_) => {
+                                        info!("Spawned closed window after closing space");
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to spawn window: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Update overlay
+                    self.update_overlay().await;
+
+                    Response::Ok
+                } else {
+                    Response::Error("Failed to remove space".to_string())
+                }
+            }
         }
     }
 
@@ -766,46 +828,47 @@ impl Daemon {
 
         info!("Window closed: {}", address);
 
-        // Remove window entirely from the list
-        if let Some(_closed_index) = self.manager.remove_window_by_address(&address).await {
-            info!("Removed closed window from list");
+        // Find which window was closed and mark it as closed (don't remove it)
+        let windows = self.manager.get_windows().await;
+        let closed_index = windows.iter().position(|w| w.address == address);
 
-            // Save state after removal
+        if let Some(closed_idx) = closed_index {
+            info!("Marking window at index {} as closed", closed_idx);
+
+            // Mark the window as closed by clearing its address
+            self.manager.mark_window_closed(&address).await;
+
+            // Save state after marking as closed
             if let Err(e) = self.manager.save_state().await {
                 error!("Failed to save state after window close: {}", e);
             }
 
-            // After removal, current index already points to the next window (the one that took its place)
-            // We don't need to call next() - just get the current window
+            // If there are other windows, switch to the next one
             let windows = self.manager.get_windows().await;
-
             if !windows.is_empty() {
-                if let Some(current_window) = self.manager.current_window().await {
-                    if current_window.is_open() {
-                        info!("Auto-switching to current window after close");
-                        if let Err(e) = self.update_visibility(&current_window.address).await {
-                            error!("Failed to switch to current window: {}", e);
+                // Switch to next window
+                info!("Switching to next window after close");
+                if let Some(next_window) = self.manager.next().await {
+                    if next_window.is_open() {
+                        // Show the next window
+                        if let Err(e) = self.update_visibility(&next_window.address).await {
+                            error!("Failed to switch to next window: {}", e);
                         }
-                        // Update overlay
-                        self.update_overlay().await;
                     } else {
-                        // Current window is closed - spawn it in the same workspace as the closed window
-                        info!("Current window is closed, spawning in same workspace");
-
-                        // The current_workspace should still have the workspace of the closed window
-                        let workspace = *self.current_workspace.read().await;
-                        info!("Spawning in workspace: {:?}", workspace);
-
-                        // Spawn the command - it will inherit the workspace because we track it in memory
-                        match self.launcher.spawn(current_window.spawn_command.clone(), Some(current_window.id.clone())).await {
+                        // Next window is closed, spawn it
+                        info!("Next window is closed, spawning it");
+                        match self.launcher.spawn(next_window.spawn_command.clone(), Some(next_window.id.clone())).await {
                             Ok(_) => {
-                                info!("Spawned closed window in same workspace");
+                                info!("Spawned next window after close");
                             }
                             Err(e) => {
-                                error!("Failed to spawn closed window: {}", e);
+                                error!("Failed to spawn next window: {}", e);
                             }
                         }
                     }
+
+                    // Update overlay
+                    self.update_overlay().await;
                 }
             } else {
                 info!("No windows remaining after close");
@@ -1180,11 +1243,69 @@ async fn handle_connection(daemon: &Daemon, conn: &mut IpcConnection) -> Result<
     Ok(())
 }
 
+/// Set up persistent window rules for Space Manager UI windows
+fn setup_window_rules() {
+    info!("Setting up window rules for Space Manager UI");
+    
+    // Rules for Space Manager Settings
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("float,title:^(Space Manager Settings)$")
+        .output();
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("center,title:^(Space Manager Settings)$")
+        .output();
+    
+    // Rules for New Space window
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("float,title:^(New Space)$")
+        .output();
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("center,title:^(New Space)$")
+        .output();
+    
+    // Rules for Change Space Icon
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("float,title:^(Change Space Icon)$")
+        .output();
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("center,title:^(Change Space Icon)$")
+        .output();
+    
+    // Rules for Add Command Template
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("float,title:^(Add Command Template)$")
+        .output();
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrulev2")
+        .arg("center,title:^(Add Command Template)$")
+        .output();
+    
+    info!("Window rules configured");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     info!("Starting Space Manager daemon");
+
+    // Set up persistent window rules for Space Manager dialogs
+    setup_window_rules();
 
     let daemon = Arc::new(Daemon::new()?);
 

@@ -74,6 +74,7 @@ pub enum Command {
     GetTemplates,  // Get list of command templates
     AddTemplate(String, String),  // Add new template (name, command)
     RemoveTemplate(String),  // Remove template by name
+    CloseSpace(usize),  // Close window and remove space at index
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
