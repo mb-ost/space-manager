@@ -1,10 +1,10 @@
 use anyhow::Result;
-use browser_spaces::ipc::{IpcServer, IpcConnection};
-use browser_spaces::manager::SpaceManager;
-use browser_spaces::overlay::OverlayManager;
-use browser_spaces::process::ProcessLauncher;
-use browser_spaces::types::{Command, ManagedWindow, Response};
-use browser_spaces::input::{InputListener, MouseButton};
+use space_manager::ipc::{IpcServer, IpcConnection};
+use space_manager::manager::SpaceManager;
+use space_manager::overlay::OverlayManager;
+use space_manager::process::ProcessLauncher;
+use space_manager::types::{Command, ManagedWindow, Response};
+use space_manager::input::{InputListener, MouseButton};
 use hyprland::event_listener::EventListener;
 use hyprland::shared::HyprData;
 use hyprland::data::Clients;
@@ -463,7 +463,7 @@ impl Daemon {
                 Response::Templates(json_templates)
             }
             Command::AddTemplate(name, command) => {
-                use browser_spaces::manager::CommandTemplate;
+                use space_manager::manager::CommandTemplate;
                 let template = CommandTemplate { name, command };
                 match self.manager.add_template(template).await {
                     Ok(_) => {

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use browser_spaces::ipc::IpcClient;
-use browser_spaces::types::{Command, Response};
+use space_manager::ipc::IpcClient;
+use space_manager::types::{Command, Response};
 use std::env;
 
 #[tokio::main]
