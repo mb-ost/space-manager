@@ -1247,52 +1247,46 @@ async fn handle_connection(daemon: &Daemon, conn: &mut IpcConnection) -> Result<
 fn setup_window_rules() {
     info!("Setting up window rules for Space Manager UI");
     
+    // Rules for overlay window - must be set early!
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrule")
+        .arg("float on, match:class com.spacermanager.overlay")
+        .output();
+
+    // Generic rule for all space-manager class windows to float and center
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrule")
+        .arg("float on, center on, match:class space-manager")
+        .output();
+
     // Rules for Space Manager Settings
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
-        .arg("windowrulev2")
-        .arg("float,title:^(Space Manager Settings)$")
-        .output();
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("windowrulev2")
-        .arg("center,title:^(Space Manager Settings)$")
+        .arg("windowrule")
+        .arg("float on, center on, match:title Space Manager Settings")
         .output();
     
     // Rules for New Space window
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
-        .arg("windowrulev2")
-        .arg("float,title:^(New Space)$")
-        .output();
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("windowrulev2")
-        .arg("center,title:^(New Space)$")
+        .arg("windowrule")
+        .arg("float on, center on, match:title New Space")
         .output();
     
     // Rules for Change Space Icon
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
-        .arg("windowrulev2")
-        .arg("float,title:^(Change Space Icon)$")
-        .output();
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("windowrulev2")
-        .arg("center,title:^(Change Space Icon)$")
+        .arg("windowrule")
+        .arg("float on, center on, match:title Change Space Icon")
         .output();
     
     // Rules for Add Command Template
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
-        .arg("windowrulev2")
-        .arg("float,title:^(Add Command Template)$")
-        .output();
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("windowrulev2")
-        .arg("center,title:^(Add Command Template)$")
+        .arg("windowrule")
+        .arg("float on, center on, match:title Add Command Template")
         .output();
     
     info!("Window rules configured");

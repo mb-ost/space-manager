@@ -490,14 +490,17 @@ impl OverlayManager {
 
         // Spawn GTK in a separate thread
         std::thread::spawn(move || {
-            // Set float rule so overlay doesn't tile
+            // Set float rule so overlay doesn't tile using new Hyprland 0.53.0 syntax
             let _ = std::process::Command::new("hyprctl")
                 .arg("keyword")
-                .arg("windowrulev2")
-                .arg("float,title:^(Space Manager Overlay)$")
+                .arg("windowrule")
+                .arg("float on, match:class com.spacermanager.overlay")
                 .output();
 
             info!("Float rule added for overlay");
+
+            // Wait to ensure rules are registered before creating window
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
             let app = Application::builder()
                 .application_id("com.spacermanager.overlay")
@@ -563,28 +566,42 @@ impl OverlayManager {
 
                 // Calculate and apply position after window is mapped
                 let from_clone2 = from_clone.clone();
+                let overlay_width_clone = overlay_width;
+                let overlay_height_clone = overlay_height;
                 window.connect_map(move |_win| {
                     // Now calculate position and move the window via Hyprland
                     let (pos_x, pos_y) = match from_clone2.as_str() {
-                        "bot_left" => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
-                        "bot_right" => (win_x + win_width - overlay_width - offset_x, win_y + win_height - overlay_height - offset_y),
+                        "bot_left" => (win_x + offset_x, win_y + win_height - overlay_height_clone - offset_y),
+                        "bot_right" => (win_x + win_width - overlay_width_clone - offset_x, win_y + win_height - overlay_height_clone - offset_y),
                         "top_left" => (win_x + offset_x, win_y + offset_y),
-                        "top_right" => (win_x + win_width - overlay_width - offset_x, win_y + offset_y),
-                        _ => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
+                        "top_right" => (win_x + win_width - overlay_width_clone - offset_x, win_y + offset_y),
+                        _ => (win_x + offset_x, win_y + win_height - overlay_height_clone - offset_y),
                     };
 
                     info!("Window mapped! Moving to position: ({}, {})", pos_x, pos_y);
 
-                    // Move window using hyprctl
+                    // Move and resize window using hyprctl
                     std::thread::spawn(move || {
-                        // Small delay to ensure window is fully created
+                        // Small delay to ensure window is fully created and floating
                         std::thread::sleep(std::time::Duration::from_millis(50));
+
+                        // First, set the exact size for the floating window
+                        let _ = std::process::Command::new("hyprctl")
+                            .arg("dispatch")
+                            .arg("resizewindowpixel")
+                            .arg(format!("exact {} {},title:(Space Manager Overlay)", overlay_width_clone, overlay_height_clone))
+                            .output();
+
+                        info!("Window resized to {}x{}", overlay_width_clone, overlay_height_clone);
+
+                        // Small delay between operations
+                        std::thread::sleep(std::time::Duration::from_millis(30));
 
                         // Position the window
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("movewindowpixel")
-                            .arg(format!("exact {} {},title:^Space Manager Overlay$", pos_x, pos_y))
+                            .arg(format!("exact {} {},title:(Space Manager Overlay)", pos_x, pos_y))
                             .output();
 
                         info!("Window moved to ({}, {})", pos_x, pos_y);
@@ -596,7 +613,7 @@ impl OverlayManager {
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("pin")
-                            .arg("title:^Space Manager Overlay$")
+                            .arg("title:(Space Manager Overlay)")
                             .output();
 
                         info!("Overlay pinned");
@@ -862,8 +879,8 @@ impl OverlayManager {
                                         .modal(true)
                                         .build();
 
-                                    // Add float and center rules using centralized helper
-                                    window_utils::apply_float_center_rules("Change Space Icon");
+                                    // Add float and center rules with explicit size enforcement
+                                    window_utils::apply_float_center_with_size("Change Space Icon", 300, 150);
 
                                     // Apply centralized theme
                                     theme::apply_template_window_theme(&dialog);
@@ -1142,8 +1159,8 @@ fn show_settings_dialog(app: &Application) {
         .modal(true)
         .build();
 
-    // Add float and center rules using centralized helper
-    window_utils::apply_float_center_rules("Space Manager Settings");
+    // Add float and center rules with explicit size enforcement
+    window_utils::apply_float_center_with_size("Space Manager Settings", 500, 600);
 
     // Main vertical box with standard margins
     let main_box = dialog_utils::create_standard_container();
@@ -1442,8 +1459,8 @@ fn show_new_space_window() {
         .modal(true)
         .build();
 
-    // Add float and center rules using centralized helper
-    window_utils::apply_float_center_rules("New Space");
+    // Add float and center rules with explicit size enforcement
+    window_utils::apply_float_center_with_size("New Space", 500, 400);
 
     // Apply centralized theme to dialog
     theme::apply_template_window_theme(&dialog);

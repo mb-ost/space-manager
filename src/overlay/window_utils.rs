@@ -11,18 +11,48 @@ pub fn apply_float_center_rules(window_title: &str) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
 
-        let _ = Command::new("hyprctl")
-            .arg("keyword")
-            .arg("windowrulev2")
-            .arg(format!("float,title:^({})$", title))
-            .output();
+        // Use new Hyprland 0.53.0 inline windowrule syntax
+        let rule = format!("float on, center on, match:title {}", title);
 
         let _ = Command::new("hyprctl")
             .arg("keyword")
-            .arg("windowrulev2")
-            .arg(format!("center,title:^({})$", title))
+            .arg("windowrule")
+            .arg(&rule)
             .output();
     });
+}
+
+/// Apply float and center rules with explicit size enforcement
+/// This ensures the window has the correct size when floating
+pub fn apply_float_center_with_size(window_title: &str, width: i32, height: i32) {
+    let title = window_title.to_string();
+
+    // First set the window rules
+    apply_float_center_rules(&title);
+
+    // Then spawn a thread to enforce the size after window is created
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+
+        // Get window address by title
+        if let Some(address) = get_window_address_by_title(&title) {
+            // Set explicit size
+            let _ = Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("resizewindowpixel")
+                .arg(format!("exact {} {},address:{}", width, height, address))
+                .output();
+        }
+    });
+}
+
+/// Force a window to float using dispatch (for when window rules don't work)
+pub fn force_window_float_by_title(window_title: &str) {
+    let _ = Command::new("hyprctl")
+        .arg("dispatch")
+        .arg("togglefloating")
+        .arg(format!("title:({})", window_title))
+        .output();
 }
 
 /// Apply float rule only to a window by class
@@ -31,10 +61,13 @@ pub fn apply_float_rule_by_class(window_class: &str) {
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
 
+        // Use new Hyprland 0.53.0 inline windowrule syntax
+        let rule = format!("float on, match:class {}", class);
+
         let _ = Command::new("hyprctl")
             .arg("keyword")
-            .arg("windowrulev2")
-            .arg(format!("float,class:^({})$", class))
+            .arg("windowrule")
+            .arg(&rule)
             .output();
     });
 }
