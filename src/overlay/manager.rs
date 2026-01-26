@@ -355,6 +355,30 @@ impl OverlayManager {
             if let Some(addr) = self.get_overlay_window_address() {
                 info!("Overlay address: {}", addr);
 
+                // Disable follow_mouse to prevent focus changes during reposition
+                let original_follow_mouse = get_follow_mouse_setting();
+                set_follow_mouse(0);
+
+                // Disable cursor warping to prevent cursor from moving to focused window
+                let cursor_no_warps_output = std::process::Command::new("hyprctl")
+                    .arg("getoption")
+                    .arg("cursor:no_warps")
+                    .arg("-j")
+                    .output()
+                    .ok();
+
+                let original_no_warps = cursor_no_warps_output
+                    .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+                    .and_then(|json| json["int"].as_i64())
+                    .unwrap_or(0);
+
+                // Enable no_warps (1 = cursor doesn't warp to focused windows)
+                let _ = std::process::Command::new("hyprctl")
+                    .arg("keyword")
+                    .arg("cursor:no_warps")
+                    .arg("1")
+                    .output();
+
                 // Get current size and resize if needed
                 if let Some((current_w, current_h)) = self.get_overlay_window_size() {
                     let delta_w = overlay_width - current_w;
@@ -365,42 +389,13 @@ impl OverlayManager {
                     if delta_w != 0 || delta_h != 0 {
                         info!("Resizing overlay from {}x{} to {}x{}", current_w, current_h, overlay_width, overlay_height);
 
-                        // Disable cursor warping to prevent cursor from moving to focused window
-                        let cursor_no_warps_output = std::process::Command::new("hyprctl")
-                            .arg("getoption")
-                            .arg("cursor:no_warps")
-                            .arg("-j")
-                            .output()
-                            .ok();
-
-                        let original_no_warps = cursor_no_warps_output
-                            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-                            .and_then(|json| json["int"].as_i64())
-                            .unwrap_or(0);
-
-                        // Enable no_warps (1 = cursor doesn't warp to focused windows)
-                        let _ = std::process::Command::new("hyprctl")
-                            .arg("keyword")
-                            .arg("cursor:no_warps")
-                            .arg("1")
-                            .output();
-
-                        // Focus the overlay window first so resizeactive works
-                        let _ = std::process::Command::new("hyprctl")
-                            .arg("dispatch")
-                            .arg("focuswindow")
-                            .arg(format!("address:{}", addr))
-                            .output();
-
-                        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-                        // Now resize using resizeactive exact
-                        let resize_cmd = format!("exact {} {}", overlay_width, overlay_height);
-                        info!("Executing: hyprctl dispatch resizeactive {}", resize_cmd);
+                        // Resize using resizewindowpixel with address selector (doesn't require focus)
+                        let resize_cmd = format!("exact {} {},address:{}", overlay_width, overlay_height, addr);
+                        info!("Executing: hyprctl dispatch resizewindowpixel {}", resize_cmd);
 
                         let output = std::process::Command::new("hyprctl")
                             .arg("dispatch")
-                            .arg("resizeactive")
+                            .arg("resizewindowpixel")
                             .arg(&resize_cmd)
                             .output();
 
@@ -412,30 +407,10 @@ impl OverlayManager {
                         }
 
                         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-                        // Restore focus to tracked window
-                        if let Some(track_addr) = tracked_window_address {
-                            let _ = std::process::Command::new("hyprctl")
-                                .arg("dispatch")
-                                .arg("focuswindow")
-                                .arg(format!("address:{}", track_addr))
-                                .output();
-                        }
-
-                        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-                        // Restore cursor:no_warps setting
-                        let _ = std::process::Command::new("hyprctl")
-                            .arg("keyword")
-                            .arg("cursor:no_warps")
-                            .arg(format!("{}", original_no_warps))
-                            .output();
-
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
                 }
 
-                // Move to position
+                // Move to position (doesn't require focus - uses address selector)
                 let move_cmd = format!("exact {} {},address:{}", pos_x, pos_y, addr);
                 info!("Executing: hyprctl dispatch movewindowpixel {}", move_cmd);
 
@@ -451,6 +426,18 @@ impl OverlayManager {
                         error!("Move error: {}", String::from_utf8_lossy(&out.stderr));
                     }
                 }
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+                // Restore cursor:no_warps setting
+                let _ = std::process::Command::new("hyprctl")
+                    .arg("keyword")
+                    .arg("cursor:no_warps")
+                    .arg(format!("{}", original_no_warps))
+                    .output();
+
+                // Restore follow_mouse setting
+                set_follow_mouse(original_follow_mouse);
 
                 info!("Resize and reposition complete");
             } else {
@@ -497,7 +484,14 @@ impl OverlayManager {
                 .arg("float on, match:class com.spacermanager.overlay")
                 .output();
 
-            info!("Float rule added for overlay");
+            // Prevent overlay from stealing focus on launch
+            let _ = std::process::Command::new("hyprctl")
+                .arg("keyword")
+                .arg("windowrule")
+                .arg("nofocus on, match:class com.spacermanager.overlay")
+                .output();
+
+            info!("Float and nofocus rules added for overlay");
 
             // Wait to ensure rules are registered before creating window
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -582,14 +576,42 @@ impl OverlayManager {
 
                     // Move and resize window using hyprctl
                     std::thread::spawn(move || {
-                        // Small delay to ensure window is fully created and floating
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        // Wait for Hyprland to register the window before moving it
+                        let max_attempts = 50; // 50 * 20ms = 1 second max wait
+                        let mut registered = false;
+                        for attempt in 0..max_attempts {
+                            if let Ok(output) = std::process::Command::new("hyprctl")
+                                .arg("clients")
+                                .arg("-j")
+                                .output()
+                            {
+                                if let Ok(clients) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                                    if let Some(clients_array) = clients.as_array() {
+                                        for client in clients_array {
+                                            if client["title"].as_str() == Some("Space Manager Overlay") {
+                                                info!("Hyprland registered overlay window after {}ms", attempt * 20);
+                                                registered = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if registered {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+
+                        if !registered {
+                            error!("Timeout waiting for Hyprland to register overlay window");
+                        }
 
                         // First, set the exact size for the floating window
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("resizewindowpixel")
-                            .arg(format!("exact {} {},title:(Space Manager Overlay)", overlay_width_clone, overlay_height_clone))
+                            .arg(format!("exact {} {},title:^Space Manager Overlay$", overlay_width_clone, overlay_height_clone))
                             .output();
 
                         info!("Window resized to {}x{}", overlay_width_clone, overlay_height_clone);
@@ -601,7 +623,7 @@ impl OverlayManager {
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("movewindowpixel")
-                            .arg(format!("exact {} {},title:(Space Manager Overlay)", pos_x, pos_y))
+                            .arg(format!("exact {} {},title:^Space Manager Overlay$", pos_x, pos_y))
                             .output();
 
                         info!("Window moved to ({}, {})", pos_x, pos_y);
@@ -613,7 +635,7 @@ impl OverlayManager {
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("pin")
-                            .arg("title:(Space Manager Overlay)")
+                            .arg("title:^Space Manager Overlay$")
                             .output();
 
                         info!("Overlay pinned");
@@ -638,6 +660,7 @@ impl OverlayManager {
                 // Create popover menu
                 let menu = gtk4::gio::Menu::new();
                 menu.append(Some("New Space..."), Some("app.new_space"));
+                menu.append(Some("Reset Position"), Some("app.reset_position"));
                 menu.append(Some("Settings"), Some("app.settings"));
 
                 let popover = gtk4::PopoverMenu::builder()
@@ -654,6 +677,14 @@ impl OverlayManager {
                     show_new_space_window();
                 });
                 app.add_action(&new_space_action);
+
+                // Add "Reset Position" action
+                let reset_position_action = gtk4::gio::SimpleAction::new("reset_position", None);
+                reset_position_action.connect_activate(move |_, _| {
+                    info!("Reset Position clicked");
+                    ipc_helpers::reset_overlay_position();
+                });
+                app.add_action(&reset_position_action);
 
                 // Add settings action
                 let app_clone = app.clone();

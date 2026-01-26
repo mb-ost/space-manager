@@ -75,6 +75,7 @@ pub enum Command {
     AddTemplate(String, String),  // Add new template (name, command)
     RemoveTemplate(String),  // Remove template by name
     CloseSpace(usize),  // Close window and remove space at index
+    ResetOverlayPosition,  // Force reposition overlay to configured location
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

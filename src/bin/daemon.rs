@@ -454,6 +454,25 @@ impl Daemon {
                     }
                 }
             }
+            Command::ResetOverlayPosition => {
+                info!("Resetting overlay position");
+                let overlay_config = self.manager.get_overlay_config().await;
+                let tracked_window_address = self.manager.current_window().await
+                    .filter(|w| w.is_open())
+                    .map(|w| w.address.clone());
+
+                self.overlay.resize_and_reposition_overlay(
+                    &overlay_config.from_overlay,
+                    overlay_config.offset_x,
+                    overlay_config.offset_y,
+                    &overlay_config.overlay_size,
+                    overlay_config.change_area_fraction,
+                    overlay_config.min_change_area_px,
+                    &overlay_config.from_area,
+                    tracked_window_address.as_deref(),
+                ).await;
+                Response::Ok
+            }
             Command::GetTemplates => {
                 let templates = self.manager.get_templates().await;
                 let json_templates: Vec<serde_json::Value> = templates
@@ -1252,6 +1271,13 @@ fn setup_window_rules() {
         .arg("keyword")
         .arg("windowrule")
         .arg("float on, match:class com.spacermanager.overlay")
+        .output();
+
+    // Prevent overlay from stealing focus on launch
+    let _ = std::process::Command::new("hyprctl")
+        .arg("keyword")
+        .arg("windowrule")
+        .arg("nofocus on, match:class com.spacermanager.overlay")
         .output();
 
     // Generic rule for all space-manager class windows to float and center

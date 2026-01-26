@@ -102,6 +102,12 @@ pub fn reload_config() {
     send_command_async(serde_json::json!("ReloadConfig"));
 }
 
+/// Reset overlay position to configured location
+pub fn reset_overlay_position() {
+    info!("Resetting overlay position");
+    send_command_async(serde_json::json!("ResetOverlayPosition"));
+}
+
 /// Get list of command templates
 pub fn get_templates<F>(callback: F)
 where
