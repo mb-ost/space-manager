@@ -107,8 +107,14 @@ impl OverlayManager {
             }
         };
 
-        // Check if window is already created
-        let created = *self.window_created.read().await;
+        // Check if window is already created. If Hyprland dropped the surface during a
+        // display reset, the boolean can be stale, so verify the actual window exists.
+        let mut created = *self.window_created.read().await;
+        if created && self.get_overlay_window_address().is_none() {
+            info!("Overlay window missing, recreating it");
+            *self.window_created.write().await = false;
+            created = false;
+        }
 
         if config_changed && created {
             info!("Overlay config changed, calling resize_and_reposition_overlay");
@@ -156,23 +162,25 @@ impl OverlayManager {
             info!("Saved overlay position: ({}, {})", x, y);
         }
 
-        // Unpin the overlay so it's no longer visible on all workspaces
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("pin")
-            .arg("title:^Space Manager Overlay$")
-            .output();
+        if let Some(address) = self.get_overlay_window_address() {
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("pin")
+                .arg(format!("address:{}", address))
+                .output();
 
-        info!("Unpinned overlay");
+            info!("Unpinned overlay");
 
-        // Move to special workspace where we hide invisible tabs
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("movetoworkspacesilent")
-            .arg("special:spaces,title:^Space Manager Overlay$")
-            .output();
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("movetoworkspacesilent")
+                .arg(format!("special:spaces,address:{}", address))
+                .output();
 
-        info!("Moved overlay to special:spaces");
+            info!("Moved overlay to special:spaces");
+        } else {
+            error!("Could not find overlay window to hide");
+        }
 
         *self.overlay_visible.write().await = false;
     }
@@ -186,41 +194,40 @@ impl OverlayManager {
         // We'll move it to the active workspace first
         let active_workspace = get_active_workspace().unwrap_or(1);
 
-        // Move overlay from special workspace to active workspace
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("movetoworkspacesilent")
-            .arg(format!("{},title:^Space Manager Overlay$", active_workspace))
-            .output();
-
-        info!("Moved overlay to workspace {}", active_workspace);
-
-        // Small delay to ensure move completes
-        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-        // Restore saved position if available
-        if let Some((x, y)) = *self.saved_position.read().await {
-            info!("Restoring overlay position: ({}, {})", x, y);
+        if let Some(address) = self.get_overlay_window_address() {
             let _ = std::process::Command::new("hyprctl")
                 .arg("dispatch")
-                .arg("movewindowpixel")
-                .arg(format!("exact {} {},title:^Space Manager Overlay$", x, y))
+                .arg("movetoworkspacesilent")
+                .arg(format!("{},address:{}", active_workspace, address))
                 .output();
+
+            info!("Moved overlay to workspace {}", active_workspace);
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+            if let Some((x, y)) = *self.saved_position.read().await {
+                info!("Restoring overlay position: ({}, {})", x, y);
+                let _ = std::process::Command::new("hyprctl")
+                    .arg("dispatch")
+                    .arg("movewindowpixel")
+                    .arg(format!("exact {} {},address:{}", x, y, address))
+                    .output();
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("pin")
+                .arg(format!("address:{}", address))
+                .output();
+
+            info!("Pinned overlay");
+            *self.overlay_visible.write().await = true;
+        } else {
+            error!("Could not find overlay window to show");
+            *self.overlay_visible.write().await = false;
         }
-
-        // Small delay before pinning
-        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-
-        // Pin the overlay so it shows on all workspaces
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("pin")
-            .arg("title:^Space Manager Overlay$")
-            .output();
-
-        info!("Pinned overlay");
-
-        *self.overlay_visible.write().await = true;
     }
 
     /// Check if overlay is currently visible
@@ -578,7 +585,7 @@ impl OverlayManager {
                     std::thread::spawn(move || {
                         // Wait for Hyprland to register the window before moving it
                         let max_attempts = 50; // 50 * 20ms = 1 second max wait
-                        let mut registered = false;
+                        let mut overlay_address = None;
                         for attempt in 0..max_attempts {
                             if let Ok(output) = std::process::Command::new("hyprctl")
                                 .arg("clients")
@@ -587,31 +594,33 @@ impl OverlayManager {
                             {
                                 if let Ok(clients) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
                                     if let Some(clients_array) = clients.as_array() {
-                                        for client in clients_array {
+                                        overlay_address = clients_array.iter().find_map(|client| {
                                             if client["title"].as_str() == Some("Space Manager Overlay") {
-                                                info!("Hyprland registered overlay window after {}ms", attempt * 20);
-                                                registered = true;
-                                                break;
+                                                client["address"].as_str().map(|address| address.to_string())
+                                            } else {
+                                                None
                                             }
-                                        }
+                                        });
                                     }
                                 }
                             }
-                            if registered {
+                            if overlay_address.is_some() {
+                                info!("Hyprland registered overlay window after {}ms", attempt * 20);
                                 break;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(20));
                         }
 
-                        if !registered {
+                        let Some(overlay_address) = overlay_address else {
                             error!("Timeout waiting for Hyprland to register overlay window");
-                        }
+                            return;
+                        };
 
                         // First, set the exact size for the floating window
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("resizewindowpixel")
-                            .arg(format!("exact {} {},title:^Space Manager Overlay$", overlay_width_clone, overlay_height_clone))
+                            .arg(format!("exact {} {},address:{}", overlay_width_clone, overlay_height_clone, overlay_address))
                             .output();
 
                         info!("Window resized to {}x{}", overlay_width_clone, overlay_height_clone);
@@ -623,7 +632,7 @@ impl OverlayManager {
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("movewindowpixel")
-                            .arg(format!("exact {} {},title:^Space Manager Overlay$", pos_x, pos_y))
+                            .arg(format!("exact {} {},address:{}", pos_x, pos_y, overlay_address))
                             .output();
 
                         info!("Window moved to ({}, {})", pos_x, pos_y);
@@ -635,7 +644,7 @@ impl OverlayManager {
                         let _ = std::process::Command::new("hyprctl")
                             .arg("dispatch")
                             .arg("pin")
-                            .arg("title:^Space Manager Overlay$")
+                            .arg(format!("address:{}", overlay_address))
                             .output();
 
                         info!("Overlay pinned");

@@ -634,6 +634,88 @@ impl Daemon {
         None
     }
 
+    /// Get the currently active workspace ID from Hyprland
+    fn get_active_workspace_id(&self) -> Option<i32> {
+        let output = std::process::Command::new("hyprctl")
+            .arg("activeworkspace")
+            .arg("-j")
+            .output()
+            .ok()?;
+
+        let workspace: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        workspace["id"].as_i64().map(|id| id as i32)
+    }
+
+    /// Keep the in-memory workspace tracker aligned with the currently visible managed window.
+    async fn sync_current_workspace_from_current_window(&self) {
+        if let Some(current_window) = self.manager.current_window().await.filter(|w| w.is_open()) {
+            if let Some(workspace) = self.get_window_workspace(&current_window.address) {
+                if workspace > 0 {
+                    *self.current_workspace.write().await = Some(workspace);
+                    debug!("Synced current workspace from current window: {}", workspace);
+                }
+            }
+        }
+    }
+
+    /// Reposition the overlay to the currently tracked managed window.
+    async fn refresh_overlay_position(&self) {
+        let tracked_window_address = self.manager.current_window().await
+            .filter(|w| w.is_open())
+            .map(|w| w.address.clone());
+
+        let Some(tracked_window_address) = tracked_window_address else {
+            debug!("Skipping overlay reposition: no open tracked window");
+            return;
+        };
+
+        let overlay_config = self.manager.get_overlay_config().await;
+        self.overlay.resize_and_reposition_overlay(
+            &overlay_config.from_overlay,
+            overlay_config.offset_x,
+            overlay_config.offset_y,
+            &overlay_config.overlay_size,
+            overlay_config.change_area_fraction,
+            overlay_config.min_change_area_px,
+            &overlay_config.from_area,
+            Some(tracked_window_address.as_str()),
+        ).await;
+    }
+
+    /// Resolve the workspace where the next visible managed window should be shown.
+    async fn resolve_target_workspace(&self, all_windows: &[ManagedWindow]) -> i32 {
+        let visible_workspaces = self.get_visible_workspaces();
+        let cached_workspace = *self.current_workspace.read().await;
+
+        if let Some(workspace) = cached_workspace.filter(|ws| *ws > 0 && visible_workspaces.contains(ws)) {
+            return workspace;
+        }
+
+        if let Some(workspace) = all_windows
+            .iter()
+            .filter(|window| window.is_open())
+            .filter_map(|window| self.get_window_workspace(&window.address))
+            .find(|workspace| *workspace > 0 && visible_workspaces.contains(workspace))
+        {
+            return workspace;
+        }
+
+        if let Some(workspace) = cached_workspace.filter(|ws| *ws > 0) {
+            return workspace;
+        }
+
+        if let Some(workspace) = all_windows
+            .iter()
+            .filter(|window| window.is_open())
+            .filter_map(|window| self.get_window_workspace(&window.address))
+            .find(|workspace| *workspace > 0)
+        {
+            return workspace;
+        }
+
+        self.get_active_workspace_id().unwrap_or(1)
+    }
+
     /// Update visibility: show target window, hide all others
     async fn update_visibility(&self, target_address: &str) -> Result<()> {
         // Acquire lock to prevent overlapping visibility updates during rapid tab switching
@@ -667,29 +749,10 @@ impl Daemon {
         // Get all tracked windows
         let all_windows = self.manager.get_windows().await;
 
-        // Determine target workspace BEFORE hiding any windows
-        // Try to get workspace from current_workspace in memory, or find any window that's NOT in the special workspace
-        let target_workspace = {
-            let current_ws = self.current_workspace.read().await;
-            if let Some(ws) = *current_ws {
-                info!("Using tracked workspace from memory: {}", ws);
-                ws
-            } else {
-                // Fallback: Find any window that's NOT in the special workspace (workspace ID < 0 means special)
-                all_windows
-                    .iter()
-                    .filter_map(|win| {
-                        let ws = self.get_window_workspace(&win.address)?;
-                        if ws > 0 {
-                            Some(ws)
-                        } else {
-                            None
-                        }
-                    })
-                    .next()
-                    .unwrap_or(1) // Default to workspace 1 if all windows are in special workspace
-            }
-        };
+        // Determine target workspace BEFORE hiding any windows.
+        // After monitor sleep/wake the cached workspace can go stale, so prefer any
+        // currently visible managed window before falling back to the cache.
+        let target_workspace = self.resolve_target_workspace(&all_windows).await;
 
         info!("Target workspace: {}", target_workspace);
 
@@ -850,6 +913,7 @@ impl Daemon {
         // Find which window was closed and mark it as closed (don't remove it)
         let windows = self.manager.get_windows().await;
         let closed_index = windows.iter().position(|w| w.address == address);
+        let current_index = self.manager.get_current_index().await;
 
         if let Some(closed_idx) = closed_index {
             info!("Marking window at index {} as closed", closed_idx);
@@ -862,36 +926,35 @@ impl Daemon {
                 error!("Failed to save state after window close: {}", e);
             }
 
-            // If there are other windows, switch to the next one
-            let windows = self.manager.get_windows().await;
-            if !windows.is_empty() {
-                // Switch to next window
-                info!("Switching to next window after close");
-                if let Some(next_window) = self.manager.next().await {
-                    if next_window.is_open() {
-                        // Show the next window
-                        if let Err(e) = self.update_visibility(&next_window.address).await {
-                            error!("Failed to switch to next window: {}", e);
-                        }
-                    } else {
-                        // Next window is closed, spawn it
-                        info!("Next window is closed, spawning it");
-                        match self.launcher.spawn(next_window.spawn_command.clone(), Some(next_window.id.clone())).await {
-                            Ok(_) => {
-                                info!("Spawned next window after close");
+            // Only advance to another space if the closed window was the currently visible one.
+            // Hidden/background windows can close independently and should not reshuffle the overlay.
+            if closed_idx == current_index {
+                let windows = self.manager.get_windows().await;
+                if !windows.is_empty() {
+                    info!("Current window closed, switching to next window");
+                    if let Some(next_window) = self.manager.next().await {
+                        if next_window.is_open() {
+                            if let Err(e) = self.update_visibility(&next_window.address).await {
+                                error!("Failed to switch to next window: {}", e);
                             }
-                            Err(e) => {
-                                error!("Failed to spawn next window: {}", e);
+                        } else {
+                            info!("Next window is closed, spawning it");
+                            match self.launcher.spawn(next_window.spawn_command.clone(), Some(next_window.id.clone())).await {
+                                Ok(_) => {
+                                    info!("Spawned next window after close");
+                                }
+                                Err(e) => {
+                                    error!("Failed to spawn next window: {}", e);
+                                }
                             }
                         }
                     }
-
-                    // Update overlay
-                    self.update_overlay().await;
+                } else {
+                    info!("No windows remaining after close");
                 }
-            } else {
-                info!("No windows remaining after close");
             }
+
+            self.update_overlay().await;
         } else {
             debug!("Closed window not tracked: {}", address);
         }
@@ -906,8 +969,14 @@ impl Daemon {
             if current_window.address == address && current_window.is_open() {
                 // Update the tracked workspace
                 if let Some(workspace) = self.get_window_workspace(&address) {
-                    *self.current_workspace.write().await = Some(workspace);
-                    debug!("Updated tracked workspace to {} (window moved)", workspace);
+                    if workspace > 0 {
+                        *self.current_workspace.write().await = Some(workspace);
+                        debug!("Updated tracked workspace to {} (window moved)", workspace);
+                    }
+                }
+
+                if self.overlay.is_overlay_visible().await {
+                    self.refresh_overlay_position().await;
                 }
             }
         }
@@ -948,22 +1017,31 @@ impl Daemon {
         let visible_workspaces = self.get_visible_workspaces();
         info!("Currently visible workspaces: {:?}", visible_workspaces);
 
-        // Check if any of our tracked windows are visible on any visible workspace
+        // Keep the current index aligned with whichever managed window is actually visible now.
         let all_windows = self.manager.get_windows().await;
-        let mut window_visible = false;
-
-        for window in all_windows.iter() {
-            if window.is_open() {
-                if let Some(win_workspace) = self.get_window_workspace(&window.address) {
-                    // Check if window is on any currently visible workspace
-                    if visible_workspaces.contains(&win_workspace) {
-                        window_visible = true;
-                        info!("Space manager window is visible on workspace {}", win_workspace);
-                        break;
-                    }
-                }
+        let visible_window = all_windows.iter().find_map(|window| {
+            if !window.is_open() {
+                return None;
             }
-        }
+
+            let workspace = self.get_window_workspace(&window.address)?;
+            if visible_workspaces.contains(&workspace) {
+                Some((window.address.clone(), workspace))
+            } else {
+                None
+            }
+        });
+
+        let window_visible = if let Some((address, workspace)) = visible_window {
+            info!("Space manager window is visible on workspace {}", workspace);
+            self.manager.switch_to_address(&address).await;
+            if workspace > 0 {
+                *self.current_workspace.write().await = Some(workspace);
+            }
+            true
+        } else {
+            false
+        };
 
         // Show or hide overlay based on window visibility
         if window_visible {
@@ -971,6 +1049,9 @@ impl Daemon {
                 info!("Showing overlay (window became visible)");
                 self.overlay.show_overlay().await;
             }
+
+            self.sync_current_workspace_from_current_window().await;
+            self.refresh_overlay_position().await;
         } else {
             if self.overlay.is_overlay_visible().await {
                 info!("Hiding overlay (window not visible on any visible workspace)");
@@ -1114,6 +1195,9 @@ impl Daemon {
         let daemon2 = self.clone();
         let daemon3 = self.clone();
         let daemon4 = self.clone();
+        let daemon5 = self.clone();
+        let daemon6 = self.clone();
+        let daemon7 = self.clone();
 
         std::thread::spawn(move || {
             let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
@@ -1167,6 +1251,45 @@ impl Daemon {
                     let workspace_id = data.id;
                     let daemon = daemon.clone();
                     runtime.spawn(async move {
+                        daemon.handle_workspace_change(workspace_id).await;
+                    });
+                }
+            });
+
+            listener.add_active_monitor_changed_handler({
+                let daemon = daemon5.clone();
+                let runtime = runtime.clone();
+                move |_data| {
+                    let daemon = daemon.clone();
+                    runtime.spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                        let workspace_id = daemon.get_active_workspace_id().unwrap_or(1);
+                        daemon.handle_workspace_change(workspace_id).await;
+                    });
+                }
+            });
+
+            listener.add_monitor_added_handler({
+                let daemon = daemon6.clone();
+                let runtime = runtime.clone();
+                move |_data| {
+                    let daemon = daemon.clone();
+                    runtime.spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        let workspace_id = daemon.get_active_workspace_id().unwrap_or(1);
+                        daemon.handle_workspace_change(workspace_id).await;
+                    });
+                }
+            });
+
+            listener.add_monitor_removed_handler({
+                let daemon = daemon7.clone();
+                let runtime = runtime.clone();
+                move |_monitor_name| {
+                    let daemon = daemon.clone();
+                    runtime.spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        let workspace_id = daemon.get_active_workspace_id().unwrap_or(1);
                         daemon.handle_workspace_change(workspace_id).await;
                     });
                 }
