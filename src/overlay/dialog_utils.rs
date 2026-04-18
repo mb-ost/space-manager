@@ -1,7 +1,6 @@
 /// Dialog builder utilities for consistent dialog creation
-
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, Orientation, Window, Align};
+use gtk4::{Align, Box as GtkBox, Button, Orientation, Window};
 
 /// Builder for creating consistent dialog windows
 pub struct DialogBuilder {
@@ -84,7 +83,7 @@ pub fn create_action_button(label: &str) -> Button {
 }
 
 /// Auto-scroll a scrolled window to show the current item with context
-/// 
+///
 /// # Arguments
 /// * `scrolled_window` - The scrolled window to scroll
 /// * `current_index` - Index of the current item
@@ -122,4 +121,3 @@ pub fn auto_scroll_to_item(
         adj.set_value(target_pos);
     });
 }
-

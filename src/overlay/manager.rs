@@ -1,49 +1,19 @@
+use crate::hypr_settings::FollowMouseGuard;
 use anyhow::Result;
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, Label, Button, Box as GtkBox, Orientation,
-          Window, Entry, CheckButton, ComboBoxText, Grid, ScrolledWindow};
+use gtk4::{
+    Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, ComboBoxText, Entry, Grid,
+    Label, Orientation, ScrolledWindow, Window,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use super::ui_components;
+use super::dialog_utils;
 use super::ipc_helpers;
 use super::theme;
+use super::ui_components;
 use super::window_utils;
-use super::dialog_utils;
-
-/// Helper function to get the current follow_mouse setting value
-fn get_follow_mouse_setting() -> i64 {
-    let follow_mouse_output = std::process::Command::new("hyprctl")
-        .arg("getoption")
-        .arg("input:follow_mouse")
-        .arg("-j")
-        .output()
-        .ok();
-
-    follow_mouse_output
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|json| json["int"].as_i64())
-        .unwrap_or(1)
-}
-
-/// Helper function to set the follow_mouse setting
-fn set_follow_mouse(value: i64) {
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("input:follow_mouse")
-        .arg(format!("{}", value))
-        .output();
-    info!("Set follow_mouse to: {}", value);
-}
-
-/// Helper function to restore follow_mouse setting after a delay
-fn restore_follow_mouse_after_delay(original_value: i64, delay_ms: u64) {
-    glib::timeout_add_local_once(std::time::Duration::from_millis(delay_ms), move || {
-        set_follow_mouse(original_value);
-        info!("Restored follow_mouse to: {}", original_value);
-    });
-}
 
 pub struct OverlayManager {
     label_text: Arc<RwLock<String>>,
@@ -77,7 +47,20 @@ impl OverlayManager {
     }
 
     /// Show persistent space indicator overlay (1-2-3-[4]-5-6)
-    pub async fn show_spaces_indicator(&self, current: usize, total: usize, windows: &[crate::types::ManagedWindow], from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str, tracked_window_address: Option<&str>) {
+    pub async fn show_spaces_indicator(
+        &self,
+        current: usize,
+        total: usize,
+        windows: &[crate::types::ManagedWindow],
+        from: &str,
+        offset_x: i32,
+        offset_y: i32,
+        overlay_size: &str,
+        change_area_fraction: f64,
+        min_change_area_px: i32,
+        from_area: &str,
+        tracked_window_address: Option<&str>,
+    ) {
         info!("show_spaces_indicator called: current={}, total={}, from={}, offset=({}, {}), overlay_size={}", current, total, from, offset_x, offset_y, overlay_size);
 
         // Create config for this call
@@ -95,13 +78,14 @@ impl OverlayManager {
         let config_changed = {
             let current_config = self.current_config.read().await;
             if let Some(old_config) = &*current_config {
-                old_config.from != new_config.from ||
-                old_config.offset_x != new_config.offset_x ||
-                old_config.offset_y != new_config.offset_y ||
-                old_config.overlay_size != new_config.overlay_size ||
-                (old_config.change_area_fraction - new_config.change_area_fraction).abs() > 0.001 ||
-                old_config.min_change_area_px != new_config.min_change_area_px ||
-                old_config.from_area != new_config.from_area
+                old_config.from != new_config.from
+                    || old_config.offset_x != new_config.offset_x
+                    || old_config.offset_y != new_config.offset_y
+                    || old_config.overlay_size != new_config.overlay_size
+                    || (old_config.change_area_fraction - new_config.change_area_fraction).abs()
+                        > 0.001
+                    || old_config.min_change_area_px != new_config.min_change_area_px
+                    || old_config.from_area != new_config.from_area
             } else {
                 false
             }
@@ -127,7 +111,8 @@ impl OverlayManager {
                 min_change_area_px,
                 from_area,
                 tracked_window_address,
-            ).await;
+            )
+            .await;
         }
 
         // Store the new config
@@ -143,7 +128,16 @@ impl OverlayManager {
         // Check if window needs to be created
         if !created {
             info!("Creating new GTK overlay window");
-            self.spawn_gtk_window(from, offset_x, offset_y, overlay_size, change_area_fraction, min_change_area_px, from_area).await;
+            self.spawn_gtk_window(
+                from,
+                offset_x,
+                offset_y,
+                overlay_size,
+                change_area_fraction,
+                min_change_area_px,
+                from_area,
+            )
+            .await;
             *self.window_created.write().await = true;
         } else {
             info!("Overlay window already exists, text will update on next refresh");
@@ -184,7 +178,6 @@ impl OverlayManager {
 
         *self.overlay_visible.write().await = false;
     }
-
 
     /// Show the persistent overlay (restore from hidden state)
     pub async fn show_overlay(&self) {
@@ -349,22 +342,37 @@ impl OverlayManager {
 
             // Calculate new position
             let (pos_x, pos_y) = match from {
-                "bot_left" => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
-                "bot_right" => (win_x + win_width - overlay_width - offset_x, win_y + win_height - overlay_height - offset_y),
+                "bot_left" => (
+                    win_x + offset_x,
+                    win_y + win_height - overlay_height - offset_y,
+                ),
+                "bot_right" => (
+                    win_x + win_width - overlay_width - offset_x,
+                    win_y + win_height - overlay_height - offset_y,
+                ),
                 "top_left" => (win_x + offset_x, win_y + offset_y),
-                "top_right" => (win_x + win_width - overlay_width - offset_x, win_y + offset_y),
-                _ => (win_x + offset_x, win_y + win_height - overlay_height - offset_y),
+                "top_right" => (
+                    win_x + win_width - overlay_width - offset_x,
+                    win_y + offset_y,
+                ),
+                _ => (
+                    win_x + offset_x,
+                    win_y + win_height - overlay_height - offset_y,
+                ),
             };
 
-            info!("Target: {}x{} at ({}, {})", overlay_width, overlay_height, pos_x, pos_y);
+            info!(
+                "Target: {}x{} at ({}, {})",
+                overlay_width, overlay_height, pos_x, pos_y
+            );
 
             // Get overlay address
             if let Some(addr) = self.get_overlay_window_address() {
                 info!("Overlay address: {}", addr);
 
-                // Disable follow_mouse to prevent focus changes during reposition
-                let original_follow_mouse = get_follow_mouse_setting();
-                set_follow_mouse(0);
+                // Suppress follow_mouse while the overlay surface is being moved so the cursor
+                // doesn't retarget focus during the address-based repositioning sequence.
+                let _follow_mouse_guard = FollowMouseGuard::suppress();
 
                 // Disable cursor warping to prevent cursor from moving to focused window
                 let cursor_no_warps_output = std::process::Command::new("hyprctl")
@@ -375,7 +383,9 @@ impl OverlayManager {
                     .ok();
 
                 let original_no_warps = cursor_no_warps_output
-                    .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+                    .and_then(|output| {
+                        serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+                    })
                     .and_then(|json| json["int"].as_i64())
                     .unwrap_or(0);
 
@@ -391,14 +401,26 @@ impl OverlayManager {
                     let delta_w = overlay_width - current_w;
                     let delta_h = overlay_height - current_h;
 
-                    info!("Current: {}x{}, delta: {}x{}", current_w, current_h, delta_w, delta_h);
+                    info!(
+                        "Current: {}x{}, delta: {}x{}",
+                        current_w, current_h, delta_w, delta_h
+                    );
 
                     if delta_w != 0 || delta_h != 0 {
-                        info!("Resizing overlay from {}x{} to {}x{}", current_w, current_h, overlay_width, overlay_height);
+                        info!(
+                            "Resizing overlay from {}x{} to {}x{}",
+                            current_w, current_h, overlay_width, overlay_height
+                        );
 
                         // Resize using resizewindowpixel with address selector (doesn't require focus)
-                        let resize_cmd = format!("exact {} {},address:{}", overlay_width, overlay_height, addr);
-                        info!("Executing: hyprctl dispatch resizewindowpixel {}", resize_cmd);
+                        let resize_cmd = format!(
+                            "exact {} {},address:{}",
+                            overlay_width, overlay_height, addr
+                        );
+                        info!(
+                            "Executing: hyprctl dispatch resizewindowpixel {}",
+                            resize_cmd
+                        );
 
                         let output = std::process::Command::new("hyprctl")
                             .arg("dispatch")
@@ -443,9 +465,6 @@ impl OverlayManager {
                     .arg(format!("{}", original_no_warps))
                     .output();
 
-                // Restore follow_mouse setting
-                set_follow_mouse(original_follow_mouse);
-
                 info!("Resize and reposition complete");
             } else {
                 error!("Could not find overlay window");
@@ -460,10 +479,16 @@ impl OverlayManager {
         self.hide_overlay().await;
     }
 
-    fn generate_indicator_text(&self, current: usize, windows: &[crate::types::ManagedWindow]) -> String {
+    fn generate_indicator_text(
+        &self,
+        current: usize,
+        windows: &[crate::types::ManagedWindow],
+    ) -> String {
         let mut parts = Vec::new();
         for (i, window) in windows.iter().enumerate() {
-            let label = window.custom_icon.as_ref()
+            let label = window
+                .custom_icon
+                .as_ref()
                 .map(|s| s.clone())
                 .unwrap_or_else(|| (i + 1).to_string());
 
@@ -476,7 +501,16 @@ impl OverlayManager {
         parts.join("-")
     }
 
-    async fn spawn_gtk_window(&self, from: &str, offset_x: i32, offset_y: i32, overlay_size: &str, change_area_fraction: f64, min_change_area_px: i32, from_area: &str) {
+    async fn spawn_gtk_window(
+        &self,
+        from: &str,
+        offset_x: i32,
+        offset_y: i32,
+        overlay_size: &str,
+        change_area_fraction: f64,
+        min_change_area_px: i32,
+        from_area: &str,
+    ) {
         let label_text = self.label_text.clone();
         let from = from.to_string();
         let overlay_size = overlay_size.to_string();
@@ -1181,7 +1215,11 @@ fn show_settings_dialog(app: &Application) {
 
     // Load current settings from config.json
     let config_file = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".space-manager").join("config.json"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".space-manager")
+                .join("config.json")
+        })
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.space-manager/config.json"));
 
     let settings = if let Ok(content) = std::fs::read_to_string(&config_file) {
@@ -1206,15 +1244,10 @@ fn show_settings_dialog(app: &Application) {
     let main_box = dialog_utils::create_standard_container();
 
     // Scrolled window for settings
-    let scrolled = ScrolledWindow::builder()
-        .vexpand(true)
-        .build();
+    let scrolled = ScrolledWindow::builder().vexpand(true).build();
 
     // Grid for form fields
-    let grid = Grid::builder()
-        .row_spacing(12)
-        .column_spacing(12)
-        .build();
+    let grid = Grid::builder().row_spacing(12).column_spacing(12).build();
 
     let mut row = 0;
 
@@ -1252,7 +1285,8 @@ fn show_settings_dialog(app: &Application) {
     from_area_combo.append(Some("right"), "Right");
     from_area_combo.append(Some("top"), "Top");
     from_area_combo.append(Some("bottom"), "Bottom");
-    let from_area_value = settings.as_ref()
+    let from_area_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["from_area"].as_str())
         .unwrap_or("left");
     from_area_combo.set_active_id(Some(from_area_value));
@@ -1268,7 +1302,8 @@ fn show_settings_dialog(app: &Application) {
     from_overlay_combo.append(Some("bot_right"), "Bottom Right");
     from_overlay_combo.append(Some("top_left"), "Top Left");
     from_overlay_combo.append(Some("top_right"), "Top Right");
-    let from_overlay_value = settings.as_ref()
+    let from_overlay_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["from_overlay"].as_str())
         .unwrap_or("bot_left");
     from_overlay_combo.set_active_id(Some(from_overlay_value));
@@ -1280,11 +1315,14 @@ fn show_settings_dialog(app: &Application) {
     let overlay_size_label = Label::new(Some("Overlay Width:"));
     overlay_size_label.set_halign(gtk4::Align::Start);
     let overlay_size_entry = Entry::new();
-    let overlay_size_value = settings.as_ref()
+    let overlay_size_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["overlay_size"].as_str())
         .unwrap_or("change_area_x");
     overlay_size_entry.set_text(overlay_size_value);
-    overlay_size_entry.set_tooltip_text(Some("change_area_x, change_area_y, or pixel value (e.g. 250)"));
+    overlay_size_entry.set_tooltip_text(Some(
+        "change_area_x, change_area_y, or pixel value (e.g. 250)",
+    ));
     grid.attach(&overlay_size_label, 0, row, 1, 1);
     grid.attach(&overlay_size_entry, 1, row, 1, 1);
     row += 1;
@@ -1293,7 +1331,8 @@ fn show_settings_dialog(app: &Application) {
     let offset_x_label = Label::new(Some("Horizontal Offset (px):"));
     offset_x_label.set_halign(gtk4::Align::Start);
     let offset_x_entry = Entry::new();
-    let offset_x_value = settings.as_ref()
+    let offset_x_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["offset_x"].as_i64())
         .unwrap_or(8);
     offset_x_entry.set_text(&offset_x_value.to_string());
@@ -1305,7 +1344,8 @@ fn show_settings_dialog(app: &Application) {
     let offset_y_label = Label::new(Some("Vertical Offset (px):"));
     offset_y_label.set_halign(gtk4::Align::Start);
     let offset_y_entry = Entry::new();
-    let offset_y_value = settings.as_ref()
+    let offset_y_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["offset_y"].as_i64())
         .unwrap_or(26);
     offset_y_entry.set_text(&offset_y_value.to_string());
@@ -1317,7 +1357,8 @@ fn show_settings_dialog(app: &Application) {
     let fraction_label = Label::new(Some("Change Area Fraction:"));
     fraction_label.set_halign(gtk4::Align::Start);
     let fraction_entry = Entry::new();
-    let fraction_value = settings.as_ref()
+    let fraction_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["change_area_fraction"].as_f64())
         .unwrap_or(0.125);
     fraction_entry.set_text(&fraction_value.to_string());
@@ -1330,7 +1371,8 @@ fn show_settings_dialog(app: &Application) {
     let min_px_label = Label::new(Some("Min Change Area (px):"));
     min_px_label.set_halign(gtk4::Align::Start);
     let min_px_entry = Entry::new();
-    let min_px_value = settings.as_ref()
+    let min_px_value = settings
+        .as_ref()
         .and_then(|s| s["overlay"]["min_change_area_px"].as_i64())
         .unwrap_or(250);
     min_px_entry.set_text(&min_px_value.to_string());
@@ -1370,9 +1412,7 @@ fn show_settings_dialog(app: &Application) {
     apply_button.connect_clicked(move |_| {
         info!("Applying settings...");
 
-        // Get original follow_mouse setting and disable it
-        let original_follow_mouse = get_follow_mouse_setting();
-        set_follow_mouse(0);
+        let follow_mouse_guard = FollowMouseGuard::suppress();
 
         // Read existing config to preserve templates
         let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone1) {
@@ -1414,8 +1454,11 @@ fn show_settings_dialog(app: &Application) {
         // Send reload config command via IPC using centralized helper
         ipc_helpers::reload_config();
 
-        // Restore follow_mouse setting after giving time for resize to complete
-        restore_follow_mouse_after_delay(original_follow_mouse, 500);
+        // Keep suppression active briefly so any async overlay resize triggered by the reload
+        // finishes before follow_mouse is restored.
+        glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            drop(follow_mouse_guard);
+        });
     });
 
     // Save button handler (save, reload, and close dialog)
@@ -1424,9 +1467,7 @@ fn show_settings_dialog(app: &Application) {
     save_button.connect_clicked(move |_| {
         info!("Saving settings...");
 
-        // Get original follow_mouse setting and disable it
-        let original_follow_mouse = get_follow_mouse_setting();
-        set_follow_mouse(0);
+        let follow_mouse_guard = FollowMouseGuard::suppress();
 
         // Read existing config to preserve templates
         let mut existing_config = if let Ok(content) = std::fs::read_to_string(&config_file_clone2) {
@@ -1468,8 +1509,9 @@ fn show_settings_dialog(app: &Application) {
         // Send reload config command via IPC using centralized helper
         ipc_helpers::reload_config();
 
-        // Restore follow_mouse setting after giving time for resize to complete
-        restore_follow_mouse_after_delay(original_follow_mouse, 500);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            drop(follow_mouse_guard);
+        });
 
         dialog_clone2.close();
     });
@@ -1487,7 +1529,6 @@ fn show_settings_dialog(app: &Application) {
 
     dialog.present();
 }
-
 
 fn show_new_space_window() {
     info!("Creating new space window");
@@ -1508,7 +1549,6 @@ fn show_new_space_window() {
     // Create a container for swappable content
     let container = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     dialog.set_child(Some(&container));
-
 
     // Show the template list view initially
     show_template_list_view(&dialog, &container);
@@ -1533,14 +1573,13 @@ fn show_template_list_view(dialog: &gtk4::Window, container: &gtk4::Box) {
     vbox.append(&title_label);
 
     // Fetch templates using centralized helper
-    let templates = std::thread::spawn(|| {
-        ipc_helpers::get_templates_sync()
-    }).join().ok().flatten();
+    let templates = std::thread::spawn(|| ipc_helpers::get_templates_sync())
+        .join()
+        .ok()
+        .flatten();
 
     // Create scrolled window for templates list
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .vexpand(true)
-        .build();
+    let scrolled = gtk4::ScrolledWindow::builder().vexpand(true).build();
 
     let templates_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
 
@@ -1744,7 +1783,10 @@ fn show_template_use_view(dialog: &gtk4::Window, container: &gtk4::Box, command_
             None
         } else {
             // User enters 1-based position (1, 2, 3...), convert to 0-based index
-            position_str.parse::<usize>().ok().and_then(|p| if p > 0 { Some(p - 1) } else { None })
+            position_str
+                .parse::<usize>()
+                .ok()
+                .and_then(|p| if p > 0 { Some(p - 1) } else { None })
         };
 
         let icon = icon_entry_clone.text().to_string();
@@ -1781,7 +1823,6 @@ fn show_template_use_view(dialog: &gtk4::Window, container: &gtk4::Box, command_
     container.append(&vbox);
 }
 
-
 fn show_add_template_view(dialog: &gtk4::Window, container: &gtk4::Box) {
     // Clear existing content
     while let Some(child) = container.first_child() {
@@ -1808,7 +1849,9 @@ fn show_add_template_view(dialog: &gtk4::Window, container: &gtk4::Box) {
     command_label.set_halign(gtk4::Align::Start);
     command_label.add_css_class("field-label");
     let command_entry = gtk4::Entry::new();
-    command_entry.set_placeholder_text(Some("e.g. brave --user-data-dir=\"$HOME/.config/{{profile}}\""));
+    command_entry.set_placeholder_text(Some(
+        "e.g. brave --user-data-dir=\"$HOME/.config/{{profile}}\"",
+    ));
     vbox.append(&command_label);
     vbox.append(&command_entry);
 

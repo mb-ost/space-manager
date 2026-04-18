@@ -396,4 +396,3 @@ window {
     color: #ffffff;
 }
 "#;
-

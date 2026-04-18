@@ -13,7 +13,7 @@ pub struct PendingSpawn {
     pub command: String,
     pub spawn_time: u64,
     pub pid: Option<u32>,
-    pub window_id: Option<String>,  // Track which specific window we're spawning
+    pub window_id: Option<String>, // Track which specific window we're spawning
 }
 
 impl ProcessLauncher {
@@ -57,11 +57,7 @@ impl ProcessLauncher {
         Ok(pid)
     }
 
-    pub async fn match_window(
-        &self,
-        class: &str,
-        pid: Option<u32>,
-    ) -> Option<PendingSpawn> {
+    pub async fn match_window(&self, class: &str, pid: Option<u32>) -> Option<PendingSpawn> {
         let mut spawns = self.pending_spawns.write().await;
 
         let now = SystemTime::now()
@@ -71,9 +67,10 @@ impl ProcessLauncher {
 
         // Try to match by PID first (within last 10 seconds)
         if let Some(window_pid) = pid {
-            if let Some(pos) = spawns.iter().position(|s| {
-                s.pid == Some(window_pid) && now - s.spawn_time < 10
-            }) {
+            if let Some(pos) = spawns
+                .iter()
+                .position(|s| s.pid == Some(window_pid) && now - s.spawn_time < 10)
+            {
                 return Some(spawns.remove(pos));
             }
         }
