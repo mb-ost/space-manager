@@ -1,13 +1,14 @@
 use anyhow::Result;
-use space_manager::ipc::{IpcServer, IpcConnection};
+use hyprland::data::Clients;
+use hyprland::event_listener::EventListener;
+use hyprland::shared::HyprData;
+use space_manager::hypr_settings::FollowMouseGuard;
+use space_manager::input::{InputListener, MouseButton};
+use space_manager::ipc::{IpcConnection, IpcServer};
 use space_manager::manager::SpaceManager;
 use space_manager::overlay::OverlayManager;
 use space_manager::process::ProcessLauncher;
 use space_manager::types::{Command, ManagedWindow, Response};
-use space_manager::input::{InputListener, MouseButton};
-use hyprland::event_listener::EventListener;
-use hyprland::shared::HyprData;
-use hyprland::data::Clients;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 use tracing_subscriber;
@@ -120,38 +121,58 @@ impl Daemon {
         let in_change_area = match overlay_config.from_area.as_str() {
             "left" => {
                 let distance_from_left = mouse_x - window_x;
-                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_by_fraction =
+                    (window_width as f64 * overlay_config.change_area_fraction) as i32;
                 let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
-                debug!("Mouse check (left): distance={}, max={}", distance_from_left, max_allowed);
+                debug!(
+                    "Mouse check (left): distance={}, max={}",
+                    distance_from_left, max_allowed
+                );
                 distance_from_left >= 0 && distance_from_left <= max_allowed
             }
             "right" => {
                 let distance_from_right = (window_x + window_width) - mouse_x;
-                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_by_fraction =
+                    (window_width as f64 * overlay_config.change_area_fraction) as i32;
                 let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
-                debug!("Mouse check (right): distance={}, max={}", distance_from_right, max_allowed);
+                debug!(
+                    "Mouse check (right): distance={}, max={}",
+                    distance_from_right, max_allowed
+                );
                 distance_from_right >= 0 && distance_from_right <= max_allowed
             }
             "top" => {
                 let distance_from_top = mouse_y - window_y;
-                let max_by_fraction = (window_height as f64 * overlay_config.change_area_fraction) as i32;
+                let max_by_fraction =
+                    (window_height as f64 * overlay_config.change_area_fraction) as i32;
                 let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
-                debug!("Mouse check (top): distance={}, max={}", distance_from_top, max_allowed);
+                debug!(
+                    "Mouse check (top): distance={}, max={}",
+                    distance_from_top, max_allowed
+                );
                 distance_from_top >= 0 && distance_from_top <= max_allowed
             }
             "bottom" => {
                 let distance_from_bottom = (window_y + window_height) - mouse_y;
-                let max_by_fraction = (window_height as f64 * overlay_config.change_area_fraction) as i32;
+                let max_by_fraction =
+                    (window_height as f64 * overlay_config.change_area_fraction) as i32;
                 let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
-                debug!("Mouse check (bottom): distance={}, max={}", distance_from_bottom, max_allowed);
+                debug!(
+                    "Mouse check (bottom): distance={}, max={}",
+                    distance_from_bottom, max_allowed
+                );
                 distance_from_bottom >= 0 && distance_from_bottom <= max_allowed
             }
             _ => {
                 // Default to left for backward compatibility
                 let distance_from_left = mouse_x - window_x;
-                let max_by_fraction = (window_width as f64 * overlay_config.change_area_fraction) as i32;
+                let max_by_fraction =
+                    (window_width as f64 * overlay_config.change_area_fraction) as i32;
                 let max_allowed = std::cmp::max(max_by_fraction, overlay_config.min_change_area_px);
-                debug!("Mouse check (default left): distance={}, max={}", distance_from_left, max_allowed);
+                debug!(
+                    "Mouse check (default left): distance={}, max={}",
+                    distance_from_left, max_allowed
+                );
                 distance_from_left >= 0 && distance_from_left <= max_allowed
             }
         };
@@ -197,7 +218,11 @@ impl Daemon {
                     // 3. Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
+                        match self
+                            .launcher
+                            .spawn(window.spawn_command.clone(), Some(window.id.clone()))
+                            .await
+                        {
                             Ok(_) => {
                                 // Window will be opened in handle_window_open
                                 info!("Spawned closed window, waiting for it to open...");
@@ -278,7 +303,11 @@ impl Daemon {
                     // 3. Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
+                        match self
+                            .launcher
+                            .spawn(window.spawn_command.clone(), Some(window.id.clone()))
+                            .await
+                        {
                             Ok(_) => {
                                 // Window will be opened in handle_window_open
                                 info!("Spawned closed window, waiting for it to open...");
@@ -347,7 +376,11 @@ impl Daemon {
                     // Check if window is closed (no PID)
                     if !window.is_open() {
                         info!("Opening closed window: {}", window.spawn_command);
-                        match self.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
+                        match self
+                            .launcher
+                            .spawn(window.spawn_command.clone(), Some(window.id.clone()))
+                            .await
+                        {
                             Ok(_) => {
                                 info!("Spawned closed window, waiting for it to open...");
                                 return Response::Ok;
@@ -422,18 +455,16 @@ impl Daemon {
                 let windows = self.manager.get_windows().await;
                 Response::Windows(windows)
             }
-            Command::Cleanup => {
-                match self.cleanup_hidden_windows().await {
-                    Ok(count) => {
-                        info!("Closed {} hidden windows", count);
-                        Response::Ok
-                    }
-                    Err(e) => {
-                        error!("Failed to cleanup: {}", e);
-                        Response::Error(format!("Cleanup failed: {}", e))
-                    }
+            Command::Cleanup => match self.cleanup_hidden_windows().await {
+                Ok(count) => {
+                    info!("Closed {} hidden windows", count);
+                    Response::Ok
                 }
-            }
+                Err(e) => {
+                    error!("Failed to cleanup: {}", e);
+                    Response::Error(format!("Cleanup failed: {}", e))
+                }
+            },
             Command::ReloadConfig => {
                 match self.manager.reload_config().await {
                     Ok(_) => {
@@ -444,7 +475,6 @@ impl Daemon {
 
                         // Wait a bit for the overlay to be recreated if needed
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
 
                         Response::Ok
                     }
@@ -457,20 +487,25 @@ impl Daemon {
             Command::ResetOverlayPosition => {
                 info!("Resetting overlay position");
                 let overlay_config = self.manager.get_overlay_config().await;
-                let tracked_window_address = self.manager.current_window().await
+                let tracked_window_address = self
+                    .manager
+                    .current_window()
+                    .await
                     .filter(|w| w.is_open())
                     .map(|w| w.address.clone());
 
-                self.overlay.resize_and_reposition_overlay(
-                    &overlay_config.from_overlay,
-                    overlay_config.offset_x,
-                    overlay_config.offset_y,
-                    &overlay_config.overlay_size,
-                    overlay_config.change_area_fraction,
-                    overlay_config.min_change_area_px,
-                    &overlay_config.from_area,
-                    tracked_window_address.as_deref(),
-                ).await;
+                self.overlay
+                    .resize_and_reposition_overlay(
+                        &overlay_config.from_overlay,
+                        overlay_config.offset_x,
+                        overlay_config.offset_y,
+                        &overlay_config.overlay_size,
+                        overlay_config.change_area_fraction,
+                        overlay_config.min_change_area_px,
+                        &overlay_config.from_area,
+                        tracked_window_address.as_deref(),
+                    )
+                    .await;
                 Response::Ok
             }
             Command::GetTemplates => {
@@ -495,27 +530,28 @@ impl Daemon {
                     }
                 }
             }
-            Command::RemoveTemplate(name) => {
-                match self.manager.remove_template(&name).await {
-                    Ok(_) => {
-                        info!("Template '{}' removed successfully", name);
-                        Response::Ok
-                    }
-                    Err(e) => {
-                        error!("Failed to remove template: {}", e);
-                        Response::Error(format!("Failed to remove template: {}", e))
-                    }
+            Command::RemoveTemplate(name) => match self.manager.remove_template(&name).await {
+                Ok(_) => {
+                    info!("Template '{}' removed successfully", name);
+                    Response::Ok
                 }
-            }
+                Err(e) => {
+                    error!("Failed to remove template: {}", e);
+                    Response::Error(format!("Failed to remove template: {}", e))
+                }
+            },
             Command::SpawnAt(index, command, icon) => {
-                info!("Spawning new window at index {} with command: {}", index, command);
+                info!(
+                    "Spawning new window at index {} with command: {}",
+                    index, command
+                );
 
                 // Focus current visible window first
                 let _ = self.focus_current_visible().await;
 
                 // Create the window at the specified index first
                 let window = ManagedWindow::new(command.clone());
-                let window_id = window.id.clone();  // Save the ID before moving the window
+                let window_id = window.id.clone(); // Save the ID before moving the window
 
                 // Insert at the specified index
                 self.manager.insert_window_at(index, window).await;
@@ -580,12 +616,21 @@ impl Daemon {
                         if let Some(current_window) = self.manager.current_window().await {
                             if current_window.is_open() {
                                 // Switch to the current window
-                                if let Err(e) = self.update_visibility(&current_window.address).await {
+                                if let Err(e) =
+                                    self.update_visibility(&current_window.address).await
+                                {
                                     error!("Failed to switch to current window: {}", e);
                                 }
                             } else {
                                 // Current window is closed, spawn it
-                                match self.launcher.spawn(current_window.spawn_command.clone(), Some(current_window.id.clone())).await {
+                                match self
+                                    .launcher
+                                    .spawn(
+                                        current_window.spawn_command.clone(),
+                                        Some(current_window.id.clone()),
+                                    )
+                                    .await
+                                {
                                     Ok(_) => {
                                         info!("Spawned closed window after closing space");
                                     }
@@ -652,7 +697,10 @@ impl Daemon {
             if let Some(workspace) = self.get_window_workspace(&current_window.address) {
                 if workspace > 0 {
                     *self.current_workspace.write().await = Some(workspace);
-                    debug!("Synced current workspace from current window: {}", workspace);
+                    debug!(
+                        "Synced current workspace from current window: {}",
+                        workspace
+                    );
                 }
             }
         }
@@ -660,7 +708,10 @@ impl Daemon {
 
     /// Reposition the overlay to the currently tracked managed window.
     async fn refresh_overlay_position(&self) {
-        let tracked_window_address = self.manager.current_window().await
+        let tracked_window_address = self
+            .manager
+            .current_window()
+            .await
             .filter(|w| w.is_open())
             .map(|w| w.address.clone());
 
@@ -670,16 +721,18 @@ impl Daemon {
         };
 
         let overlay_config = self.manager.get_overlay_config().await;
-        self.overlay.resize_and_reposition_overlay(
-            &overlay_config.from_overlay,
-            overlay_config.offset_x,
-            overlay_config.offset_y,
-            &overlay_config.overlay_size,
-            overlay_config.change_area_fraction,
-            overlay_config.min_change_area_px,
-            &overlay_config.from_area,
-            Some(tracked_window_address.as_str()),
-        ).await;
+        self.overlay
+            .resize_and_reposition_overlay(
+                &overlay_config.from_overlay,
+                overlay_config.offset_x,
+                overlay_config.offset_y,
+                &overlay_config.overlay_size,
+                overlay_config.change_area_fraction,
+                overlay_config.min_change_area_px,
+                &overlay_config.from_area,
+                Some(tracked_window_address.as_str()),
+            )
+            .await;
     }
 
     /// Resolve the workspace where the next visible managed window should be shown.
@@ -687,7 +740,9 @@ impl Daemon {
         let visible_workspaces = self.get_visible_workspaces();
         let cached_workspace = *self.current_workspace.read().await;
 
-        if let Some(workspace) = cached_workspace.filter(|ws| *ws > 0 && visible_workspaces.contains(ws)) {
+        if let Some(workspace) =
+            cached_workspace.filter(|ws| *ws > 0 && visible_workspaces.contains(ws))
+        {
             return workspace;
         }
 
@@ -724,75 +779,61 @@ impl Daemon {
         info!("Updating visibility: showing {}", target_address);
 
         // STEP 0: Temporarily disable focus-follows-mouse to prevent mouse movement from changing focus
-        // Get current settings first
-        let focus_follows_output = std::process::Command::new("hyprctl")
-            .arg("getoption")
-            .arg("input:follow_mouse")
-            .arg("-j")
-            .output()
-            .ok();
+        let _follow_mouse_guard = FollowMouseGuard::suppress();
 
-        let original_follow_mouse = focus_follows_output
-            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-            .and_then(|json| json["int"].as_i64())
-            .unwrap_or(1); // Default to 1 if we can't read it
+        let visibility_result: Result<i32> = async {
+            // Get all tracked windows
+            let all_windows = self.manager.get_windows().await;
 
-        info!("Original follow_mouse setting: {}", original_follow_mouse);
+            // Determine target workspace BEFORE hiding any windows.
+            // After monitor sleep/wake the cached workspace can go stale, so prefer any
+            // currently visible managed window before falling back to the cache.
+            let target_workspace = self.resolve_target_workspace(&all_windows).await;
 
-        // Disable focus-follows-mouse temporarily (0 = disabled)
-        let _ = std::process::Command::new("hyprctl")
-            .arg("keyword")
-            .arg("input:follow_mouse")
-            .arg("0")
-            .output();
+            info!("Target workspace: {}", target_workspace);
 
-        // Get all tracked windows
-        let all_windows = self.manager.get_windows().await;
+            // STEP 1: Move target window to the workspace SILENTLY (no focus, no mouse movement)
+            info!(
+                "Moving target window to workspace silently: {}",
+                target_address
+            );
+            let _ = std::process::Command::new("hyprctl")
+                .arg("dispatch")
+                .arg("movetoworkspacesilent")
+                .arg(format!("{},address:{}", target_workspace, target_address))
+                .output()?;
 
-        // Determine target workspace BEFORE hiding any windows.
-        // After monitor sleep/wake the cached workspace can go stale, so prefer any
-        // currently visible managed window before falling back to the cache.
-        let target_workspace = self.resolve_target_workspace(&all_windows).await;
+            // Small delay to ensure move completes
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
 
-        info!("Target workspace: {}", target_workspace);
+            // STEP 2: Hide all other tracked windows (move to special workspace)
+            for win in all_windows.iter() {
+                if win.address != target_address && win.is_open() {
+                    info!("Hiding window: {}", win.address);
+                    let output = std::process::Command::new("hyprctl")
+                        .arg("dispatch")
+                        .arg("movetoworkspacesilent")
+                        .arg(format!("special:spaces,address:{}", win.address))
+                        .output()?;
 
-        // STEP 1: Move target window to the workspace SILENTLY (no focus, no mouse movement)
-        info!("Moving target window to workspace silently: {}", target_address);
-        let _ = std::process::Command::new("hyprctl")
-            .arg("dispatch")
-            .arg("movetoworkspacesilent")
-            .arg(format!("{},address:{}", target_workspace, target_address))
-            .output()?;
-
-        // Small delay to ensure move completes
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        // STEP 2: Hide all other tracked windows (move to special workspace)
-        for win in all_windows.iter() {
-            if win.address != target_address && win.is_open() {
-                info!("Hiding window: {}", win.address);
-                let output = std::process::Command::new("hyprctl")
-                    .arg("dispatch")
-                    .arg("movetoworkspacesilent")
-                    .arg(format!("special:spaces,address:{}", win.address))
-                    .output()?;
-
-                if !output.status.success() {
-                    error!("Failed to hide window {}: {}", win.address, String::from_utf8_lossy(&output.stderr));
+                    if !output.status.success() {
+                        error!(
+                            "Failed to hide window {}: {}",
+                            win.address,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
                 }
             }
+
+            // Small delay to ensure all operations complete
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+            Ok(target_workspace)
         }
+        .await;
 
-        // Small delay to ensure all operations complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        // STEP 3: Restore focus-follows-mouse to original setting
-        info!("Restoring follow_mouse to: {}", original_follow_mouse);
-        let _ = std::process::Command::new("hyprctl")
-            .arg("keyword")
-            .arg("input:follow_mouse")
-            .arg(format!("{}", original_follow_mouse))
-            .output();
+        let target_workspace = visibility_result?;
 
         // Update tracked workspace in memory
         *self.current_workspace.write().await = Some(target_workspace);
@@ -814,32 +855,41 @@ impl Daemon {
                     None
                 };
 
-                info!("Window details - class: '{}', title: '{}', pid: {:?}",
-                      client.class, client.title, pid_value);
+                info!(
+                    "Window details - class: '{}', title: '{}', pid: {:?}",
+                    client.class, client.title, pid_value
+                );
 
                 // Check if this window matches a pending spawn
                 if let Some(pending) = self.launcher.match_window(&client.class, pid_value).await {
-                    info!("✓ Matched spawned window: {} ({})", client.title, client.class);
+                    info!(
+                        "✓ Matched spawned window: {} ({})",
+                        client.title, client.class
+                    );
 
                     // Check if this is opening an existing closed window
                     let was_reopened = if let Some(ref window_id) = pending.window_id {
                         // We know the exact window ID - use it for precise matching
-                        self.manager.open_window_by_id(
-                            window_id,
-                            address.clone(),
-                            client.class.clone(),
-                            client.title.clone(),
-                            pid_value,
-                        ).await
+                        self.manager
+                            .open_window_by_id(
+                                window_id,
+                                address.clone(),
+                                client.class.clone(),
+                                client.title.clone(),
+                                pid_value,
+                            )
+                            .await
                     } else {
                         // Fallback to command matching (for new spawns without ID)
-                        self.manager.open_window_by_command(
-                            &pending.command,
-                            address.clone(),
-                            client.class.clone(),
-                            client.title.clone(),
-                            pid_value,
-                        ).await
+                        self.manager
+                            .open_window_by_command(
+                                &pending.command,
+                                address.clone(),
+                                client.class.clone(),
+                                client.title.clone(),
+                                pid_value,
+                            )
+                            .await
                     };
 
                     if was_reopened {
@@ -869,7 +919,12 @@ impl Daemon {
                     } else {
                         // This is a brand new window - create with command
                         let mut window = ManagedWindow::new(pending.command);
-                        window.open(address.clone(), client.class.clone(), client.title.clone(), pid_value);
+                        window.open(
+                            address.clone(),
+                            client.class.clone(),
+                            client.title.clone(),
+                            pid_value,
+                        );
 
                         // Add new window and make it current
                         self.manager.add_window(window).await;
@@ -895,7 +950,10 @@ impl Daemon {
                          */
                     }
                 } else {
-                    info!("✗ Window not matched - no pending spawn for class: '{}'", client.class);
+                    info!(
+                        "✗ Window not matched - no pending spawn for class: '{}'",
+                        client.class
+                    );
                 }
             }
         }
@@ -939,7 +997,14 @@ impl Daemon {
                             }
                         } else {
                             info!("Next window is closed, spawning it");
-                            match self.launcher.spawn(next_window.spawn_command.clone(), Some(next_window.id.clone())).await {
+                            match self
+                                .launcher
+                                .spawn(
+                                    next_window.spawn_command.clone(),
+                                    Some(next_window.id.clone()),
+                                )
+                                .await
+                            {
                                 Ok(_) => {
                                     info!("Spawned next window after close");
                                 }
@@ -1001,7 +1066,9 @@ impl Daemon {
                 return monitors_array
                     .iter()
                     .filter_map(|monitor| {
-                        monitor["activeWorkspace"]["id"].as_i64().map(|id| id as i32)
+                        monitor["activeWorkspace"]["id"]
+                            .as_i64()
+                            .map(|id| id as i32)
                     })
                     .collect();
             }
@@ -1064,8 +1131,10 @@ impl Daemon {
     async fn update_overlay(&self) {
         info!("update_overlay called");
         let overlay_config = self.manager.get_overlay_config().await;
-        info!("Overlay config: enabled={}, from_area={}, from_overlay={}",
-              overlay_config.enabled, overlay_config.from_area, overlay_config.from_overlay);
+        info!(
+            "Overlay config: enabled={}, from_area={}, from_overlay={}",
+            overlay_config.enabled, overlay_config.from_area, overlay_config.from_overlay
+        );
 
         if !overlay_config.enabled {
             info!("Overlay disabled in config");
@@ -1079,7 +1148,10 @@ impl Daemon {
 
         if total > 0 {
             // Get the current tracked window address
-            let tracked_window_address = self.manager.current_window().await
+            let tracked_window_address = self
+                .manager
+                .current_window()
+                .await
                 .filter(|w| w.is_open())
                 .map(|w| w.address.clone());
 
@@ -1099,19 +1171,21 @@ impl Daemon {
             info!("Spawning overlay task");
             tokio::spawn(async move {
                 info!("Overlay task started");
-                overlay.show_spaces_indicator(
-                    current_index,
-                    total,
-                    &windows,
-                    &from,
-                    offset_x,
-                    offset_y,
-                    &overlay_size,
-                    change_area_fraction,
-                    min_change_area_px,
-                    &from_area,
-                    tracked_window_address.as_deref(),
-                ).await;
+                overlay
+                    .show_spaces_indicator(
+                        current_index,
+                        total,
+                        &windows,
+                        &from,
+                        offset_x,
+                        offset_y,
+                        &overlay_size,
+                        change_area_fraction,
+                        min_change_area_px,
+                        &from_area,
+                        tracked_window_address.as_deref(),
+                    )
+                    .await;
                 info!("Overlay task finished");
             });
         } else {
@@ -1333,7 +1407,10 @@ impl Daemon {
         for client in clients.iter() {
             // Check if window is in special:spaces workspace
             if client.workspace.name == "special:spaces" {
-                info!("Closing hidden window: {} ({})", client.title, client.address);
+                info!(
+                    "Closing hidden window: {} ({})",
+                    client.title, client.address
+                );
                 let _ = std::process::Command::new("hyprctl")
                     .arg("dispatch")
                     .arg("closewindow")
@@ -1388,7 +1465,7 @@ async fn handle_connection(daemon: &Daemon, conn: &mut IpcConnection) -> Result<
 /// Set up persistent window rules for Space Manager UI windows
 fn setup_window_rules() {
     info!("Setting up window rules for Space Manager UI");
-    
+
     // Rules for overlay window - must be set early!
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
@@ -1416,28 +1493,28 @@ fn setup_window_rules() {
         .arg("windowrule")
         .arg("float on, center on, match:title Space Manager Settings")
         .output();
-    
+
     // Rules for New Space window
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
         .arg("windowrule")
         .arg("float on, center on, match:title New Space")
         .output();
-    
+
     // Rules for Change Space Icon
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
         .arg("windowrule")
         .arg("float on, center on, match:title Change Space Icon")
         .output();
-    
+
     // Rules for Add Command Template
     let _ = std::process::Command::new("hyprctl")
         .arg("keyword")
         .arg("windowrule")
         .arg("float on, center on, match:title Add Command Template")
         .output();
-    
+
     info!("Window rules configured");
 }
 
@@ -1458,14 +1535,24 @@ async fn main() -> Result<()> {
     } else {
         let saved_windows = daemon.manager.get_windows().await;
         if !saved_windows.is_empty() {
-            info!("Loaded {} windows from previous session (all closed)", saved_windows.len());
+            info!(
+                "Loaded {} windows from previous session (all closed)",
+                saved_windows.len()
+            );
 
             // Only restore the current window immediately, others stay closed
             let current_index = daemon.manager.get_current_index().await;
             if current_index < saved_windows.len() {
                 let window = &saved_windows[current_index];
-                info!("Restoring current window ({}): {}", current_index, window.spawn_command);
-                match daemon.launcher.spawn(window.spawn_command.clone(), Some(window.id.clone())).await {
+                info!(
+                    "Restoring current window ({}): {}",
+                    current_index, window.spawn_command
+                );
+                match daemon
+                    .launcher
+                    .spawn(window.spawn_command.clone(), Some(window.id.clone()))
+                    .await
+                {
                     Ok(pid) => {
                         info!("Restored current window with PID: {}", pid);
                     }
@@ -1475,7 +1562,10 @@ async fn main() -> Result<()> {
                 }
             }
 
-            info!("{} other windows will be opened on-demand", saved_windows.len() - 1);
+            info!(
+                "{} other windows will be opened on-demand",
+                saved_windows.len() - 1
+            );
         }
     }
 

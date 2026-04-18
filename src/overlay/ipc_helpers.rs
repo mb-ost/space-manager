@@ -130,7 +130,10 @@ pub fn remove_template(name: String) {
 
 /// Spawn a new space at a specific index
 pub fn spawn_at(index: usize, command: String, icon: Option<String>) {
-    info!("Spawning new space at index {} with command: {}", index, command);
+    info!(
+        "Spawning new space at index {} with command: {}",
+        index, command
+    );
     send_command_async(serde_json::json!({"SpawnAt": [index, command, icon]}));
 }
 
@@ -151,4 +154,3 @@ pub fn get_templates_sync() -> Option<Value> {
         }
     }
 }
-

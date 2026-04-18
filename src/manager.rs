@@ -9,13 +9,13 @@ use tracing::info;
 #[derive(Debug, Serialize, Deserialize)]
 struct WindowState {
     windows: Vec<ManagedWindow>,
-    current: Option<String>,  // ID of the current window
+    current: Option<String>, // ID of the current window
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandTemplate {
     pub name: String,
-    pub command: String,  // Can contain {{variable}} placeholders
+    pub command: String, // Can contain {{variable}} placeholders
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,15 +34,15 @@ struct ConfigFile {
 pub struct OverlayConfig {
     pub enabled: bool,
     #[serde(default = "default_from_area")]
-    pub from_area: String,   // "left", "right", "top", "bottom" - where the mouse change area is
+    pub from_area: String, // "left", "right", "top", "bottom" - where the mouse change area is
     #[serde(default = "default_from_overlay")]
-    pub from_overlay: String,   // "bot_left", "bot_right", "top_left", "top_right" - where overlay appears
-    pub offset_x: i32,  // pixels from edge
-    pub offset_y: i32,  // pixels from edge
-    pub change_area_fraction: f64,  // fraction of window width/height (e.g., 0.125 = 1/8)
-    pub min_change_area_px: i32,    // minimum area in pixels
+    pub from_overlay: String, // "bot_left", "bot_right", "top_left", "top_right" - where overlay appears
+    pub offset_x: i32,             // pixels from edge
+    pub offset_y: i32,             // pixels from edge
+    pub change_area_fraction: f64, // fraction of window width/height (e.g., 0.125 = 1/8)
+    pub min_change_area_px: i32,   // minimum area in pixels
     #[serde(default = "default_overlay_size")]
-    pub overlay_size: String,  // "change_area_x", "change_area_y", or fixed pixel value like "250"
+    pub overlay_size: String, // "change_area_x", "change_area_y", or fixed pixel value like "250"
 }
 
 fn default_from_area() -> String {
@@ -83,7 +83,7 @@ fn default_overlay_config() -> OverlayConfig {
 
 fn default_mouse_config() -> MouseConfig {
     MouseConfig {
-        change_area_fraction: 0.125,  // 1/8
+        change_area_fraction: 0.125, // 1/8
         min_change_area_px: 250,
     }
 }
@@ -117,12 +117,16 @@ impl SpaceManager {
 
     fn get_state_file_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
-        PathBuf::from(home).join(".space-manager").join("state.json")
+        PathBuf::from(home)
+            .join(".space-manager")
+            .join("state.json")
     }
 
     fn get_config_file_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
-        PathBuf::from(home).join(".space-manager").join("config.json")
+        PathBuf::from(home)
+            .join(".space-manager")
+            .join("config.json")
     }
 
     /// Load state from disk (all windows loaded as closed - PID will be None)
@@ -135,26 +139,36 @@ impl SpaceManager {
             // Load side_mouse_binds setting
             let mut side_mouse_binds = self.side_mouse_binds.write().await;
             *side_mouse_binds = config.side_mouse_binds;
-            info!("Loaded side_mouse_binds setting: {}", config.side_mouse_binds);
+            info!(
+                "Loaded side_mouse_binds setting: {}",
+                config.side_mouse_binds
+            );
 
             // Load overlay config
             let mut overlay_config = self.overlay_config.write().await;
             *overlay_config = config.overlay;
-            info!("Loaded overlay config: enabled={}, offset=({}, {})",
-                  overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
+            info!(
+                "Loaded overlay config: enabled={}, offset=({}, {})",
+                overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y
+            );
 
             // Load mouse config
             let mut mouse_config = self.mouse_config.write().await;
             *mouse_config = config.mouse;
-            info!("Loaded mouse config: fraction={}, min_px={}",
-                  mouse_config.change_area_fraction, mouse_config.min_change_area_px);
+            info!(
+                "Loaded mouse config: fraction={}, min_px={}",
+                mouse_config.change_area_fraction, mouse_config.min_change_area_px
+            );
 
             // Load templates
             let mut templates = self.templates.write().await;
             *templates = config.templates;
             info!("Loaded {} command templates", templates.len());
         } else {
-            info!("No config file found at {:?}, using defaults", self.config_file);
+            info!(
+                "No config file found at {:?}, using defaults",
+                self.config_file
+            );
         }
 
         // Load window state from state.json
@@ -179,7 +193,10 @@ impl SpaceManager {
         }
 
         // All loaded windows will have pid=None (closed state) since we use #[serde(skip)]
-        info!("Loaded {} windows from saved state (all closed)", windows.len());
+        info!(
+            "Loaded {} windows from saved state (all closed)",
+            windows.len()
+        );
         Ok(())
     }
 
@@ -282,19 +299,26 @@ impl SpaceManager {
         // Reload side_mouse_binds setting
         let mut side_mouse_binds = self.side_mouse_binds.write().await;
         *side_mouse_binds = config.side_mouse_binds;
-        info!("Reloaded side_mouse_binds setting: {}", config.side_mouse_binds);
+        info!(
+            "Reloaded side_mouse_binds setting: {}",
+            config.side_mouse_binds
+        );
 
         // Reload overlay config
         let mut overlay_config = self.overlay_config.write().await;
         *overlay_config = config.overlay;
-        info!("Reloaded overlay config: enabled={}, offset=({}, {})",
-              overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y);
+        info!(
+            "Reloaded overlay config: enabled={}, offset=({}, {})",
+            overlay_config.enabled, overlay_config.offset_x, overlay_config.offset_y
+        );
 
         // Reload mouse config
         let mut mouse_config = self.mouse_config.write().await;
         *mouse_config = config.mouse;
-        info!("Reloaded mouse config: fraction={}, min_px={}",
-              mouse_config.change_area_fraction, mouse_config.min_change_area_px);
+        info!(
+            "Reloaded mouse config: fraction={}, min_px={}",
+            mouse_config.change_area_fraction, mouse_config.min_change_area_px
+        );
 
         // Reload templates
         let mut templates = self.templates.write().await;
@@ -390,7 +414,14 @@ impl SpaceManager {
     }
 
     /// Find window by ID and mark as open
-    pub async fn open_window_by_id(&self, id: &str, address: String, class: String, title: String, pid: Option<u32>) -> bool {
+    pub async fn open_window_by_id(
+        &self,
+        id: &str,
+        address: String,
+        class: String,
+        title: String,
+        pid: Option<u32>,
+    ) -> bool {
         let mut windows = self.windows.write().await;
         if let Some(window) = windows.iter_mut().find(|w| w.id == id) {
             window.open(address, class, title, pid);
@@ -514,22 +545,25 @@ impl SpaceManager {
             return Err(anyhow::anyhow!("Invalid window index"));
         }
 
-        windows[index].custom_icon = if icon.is_empty() {
-            None
-        } else {
-            Some(icon)
-        };
+        windows[index].custom_icon = if icon.is_empty() { None } else { Some(icon) };
 
         Ok(())
     }
 
-
     /// Find closed window by command and mark as open (fallback for old spawns without ID)
-    pub async fn open_window_by_command(&self, command: &str, address: String, class: String, title: String, pid: Option<u32>) -> bool {
+    pub async fn open_window_by_command(
+        &self,
+        command: &str,
+        address: String,
+        class: String,
+        title: String,
+        pid: Option<u32>,
+    ) -> bool {
         let mut windows = self.windows.write().await;
-        if let Some(window) = windows.iter_mut().find(|w| {
-            !w.is_open() && w.spawn_command == command
-        }) {
+        if let Some(window) = windows
+            .iter_mut()
+            .find(|w| !w.is_open() && w.spawn_command == command)
+        {
             window.open(address, class, title, pid);
             true
         } else {

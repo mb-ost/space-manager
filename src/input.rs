@@ -50,10 +50,10 @@ impl InputListener {
                 }
 
                 let keys = device.supported_keys().unwrap();
-                let has_mouse_buttons = keys.contains(Key::BTN_LEFT) ||
-                    keys.contains(Key::BTN_RIGHT) ||
-                    keys.contains(Key::BTN_SIDE) ||
-                    keys.contains(Key::BTN_EXTRA);
+                let has_mouse_buttons = keys.contains(Key::BTN_LEFT)
+                    || keys.contains(Key::BTN_RIGHT)
+                    || keys.contains(Key::BTN_SIDE)
+                    || keys.contains(Key::BTN_EXTRA);
 
                 if has_mouse_buttons {
                     info!("✓ Found mouse device: {} at {:?}", name, path);
@@ -71,7 +71,10 @@ impl InputListener {
             return Ok(());
         }
 
-        info!("Monitoring {} input device(s) for side buttons", devices.len());
+        info!(
+            "Monitoring {} input device(s) for side buttons",
+            devices.len()
+        );
 
         // Monitor all mouse devices
         for device in devices {

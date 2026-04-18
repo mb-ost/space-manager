@@ -1,5 +1,4 @@
 /// Utilities for managing Hyprland window rules and properties
-
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -84,7 +83,10 @@ pub fn pin_window(address: &str) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("Failed to pin window: {:?}", String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "Failed to pin window: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -100,7 +102,10 @@ pub fn unpin_window(address: &str) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("Failed to unpin window: {:?}", String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "Failed to unpin window: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -116,7 +121,10 @@ pub fn move_to_workspace(address: &str, workspace: &str) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("Failed to move window: {:?}", String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "Failed to move window: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -153,7 +161,10 @@ pub fn resize_window_exact(address: &str, width: i32, height: i32) -> Result<(),
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("Resize failed: {:?}", String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "Resize failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 
@@ -169,7 +180,9 @@ pub fn move_window_exact(address: &str, x: i32, y: i32) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("Move failed: {:?}", String::from_utf8_lossy(&output.stderr)))
+        Err(format!(
+            "Move failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
-

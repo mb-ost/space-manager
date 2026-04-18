@@ -6,8 +6,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::debug;
 
 pub fn get_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/tmp".to_string());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(runtime_dir).join("space-manager.sock")
 }
 
@@ -21,12 +20,10 @@ impl IpcServer {
 
         // Remove old socket if it exists
         if socket_path.exists() {
-            std::fs::remove_file(&socket_path)
-                .context("Failed to remove old socket")?;
+            std::fs::remove_file(&socket_path).context("Failed to remove old socket")?;
         }
 
-        let listener = UnixListener::bind(&socket_path)
-            .context("Failed to bind Unix socket")?;
+        let listener = UnixListener::bind(&socket_path).context("Failed to bind Unix socket")?;
 
         debug!("IPC server listening on {:?}", socket_path);
 

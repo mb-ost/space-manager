@@ -2,18 +2,18 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedWindow {
-    pub id: String,  // Our own unique ID (never changes)
-    #[serde(skip)]  // Don't persist temporary Hyprland data
-    pub address: String,  // Temporary Hyprland window address
+    pub id: String, // Our own unique ID (never changes)
+    #[serde(skip)] // Don't persist temporary Hyprland data
+    pub address: String, // Temporary Hyprland window address
     #[serde(skip)]
-    pub class: String,  // Temporary class name
+    pub class: String, // Temporary class name
     #[serde(skip)]
-    pub title: String,  // Temporary title
+    pub title: String, // Temporary title
     #[serde(skip)]
-    pub pid: Option<u32>,  // PID - if Some, window is open; if None, window is closed/virtual
-    pub spawn_command: String,  // The command to spawn/respawn this window
+    pub pid: Option<u32>, // PID - if Some, window is open; if None, window is closed/virtual
+    pub spawn_command: String, // The command to spawn/respawn this window
     #[serde(default)]
-    pub custom_icon: Option<String>,  // Custom icon/emoji for the button
+    pub custom_icon: Option<String>, // Custom icon/emoji for the button
 }
 
 impl ManagedWindow {
@@ -63,19 +63,19 @@ impl ManagedWindow {
 pub enum Command {
     Next,
     Prev,
-    SwitchTo(usize),  // Switch to window at specific index
-    SwapWindows(usize, usize),  // Swap two windows by index
-    SetWindowIcon(usize, String),  // Set custom icon/label for a window
+    SwitchTo(usize),              // Switch to window at specific index
+    SwapWindows(usize, usize),    // Swap two windows by index
+    SetWindowIcon(usize, String), // Set custom icon/label for a window
     Spawn(String),
-    SpawnAt(usize, String, Option<String>),  // Spawn at specific index with optional icon
+    SpawnAt(usize, String, Option<String>), // Spawn at specific index with optional icon
     List,
-    Cleanup,  // Close all windows in special:spaces
-    ReloadConfig,  // Reload configuration from config.json
-    GetTemplates,  // Get list of command templates
-    AddTemplate(String, String),  // Add new template (name, command)
-    RemoveTemplate(String),  // Remove template by name
-    CloseSpace(usize),  // Close window and remove space at index
-    ResetOverlayPosition,  // Force reposition overlay to configured location
+    Cleanup,                     // Close all windows in special:spaces
+    ReloadConfig,                // Reload configuration from config.json
+    GetTemplates,                // Get list of command templates
+    AddTemplate(String, String), // Add new template (name, command)
+    RemoveTemplate(String),      // Remove template by name
+    CloseSpace(usize),           // Close window and remove space at index
+    ResetOverlayPosition,        // Force reposition overlay to configured location
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,5 +83,5 @@ pub enum Response {
     Ok,
     Error(String),
     Windows(Vec<ManagedWindow>),
-    Templates(Vec<serde_json::Value>),  // JSON representation of templates
+    Templates(Vec<serde_json::Value>), // JSON representation of templates
 }

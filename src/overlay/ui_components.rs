@@ -27,7 +27,10 @@ pub fn create_space_button(
     let target_index = index;
     let space_num_clone = space_num.clone();
     space_button.connect_clicked(move |_| {
-        info!("Space button {} clicked, switching to space {}", space_num_clone, target_index);
+        info!(
+            "Space button {} clicked, switching to space {}",
+            space_num_clone, target_index
+        );
         ipc_helpers::switch_to_space(target_index);
     });
 
@@ -200,4 +203,3 @@ fn show_change_icon_dialog(context_index: usize) {
     dialog.set_child(Some(&vbox));
     dialog.present();
 }
-
