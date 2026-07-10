@@ -19,10 +19,11 @@ pub struct ManagedWindow {
 impl ManagedWindow {
     /// Create a new managed window with a unique ID
     pub fn new(command: String) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        // Never panic on a clock before the epoch; fall back to 0.
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(Duration::ZERO)
             .as_millis();
         let id = format!("win_{}", timestamp);
 
@@ -76,6 +77,7 @@ pub enum Command {
     RemoveTemplate(String),      // Remove template by name
     CloseSpace(usize),           // Close window and remove space at index
     ResetOverlayPosition,        // Force reposition overlay to configured location
+    Shutdown,                    // Gracefully shut down the daemon (sent by overlay close button)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

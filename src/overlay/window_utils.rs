@@ -1,18 +1,20 @@
-/// Utilities for managing Hyprland window rules and properties
+//! Float/center helpers for the dialog windows (settings / new-space / change-icon).
+//!
+//! These run on the GTK thread (not a tokio worker) and only affect the regular
+//! GTK dialog windows, so they are deliberately out of scope for AF-4's "no
+//! blocking subprocess" rule (which targets the async daemon paths). The overlay
+//! itself is layer-shell and does not use anything here.
+
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-/// Apply float and center rules to a window by title
-/// This is used for dialogs and popups that should appear centered
+/// Apply float and center rules to a window by title.
 pub fn apply_float_center_rules(window_title: &str) {
     let title = window_title.to_string();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
-
-        // Use new Hyprland 0.53.0 inline windowrule syntax
         let rule = format!("float on, center on, match:title {}", title);
-
         let _ = Command::new("hyprctl")
             .arg("keyword")
             .arg("windowrule")
@@ -21,21 +23,14 @@ pub fn apply_float_center_rules(window_title: &str) {
     });
 }
 
-/// Apply float and center rules with explicit size enforcement
-/// This ensures the window has the correct size when floating
+/// Apply float and center rules with explicit size enforcement.
 pub fn apply_float_center_with_size(window_title: &str, width: i32, height: i32) {
     let title = window_title.to_string();
-
-    // First set the window rules
     apply_float_center_rules(&title);
 
-    // Then spawn a thread to enforce the size after window is created
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(200));
-
-        // Get window address by title
         if let Some(address) = get_window_address_by_title(&title) {
-            // Set explicit size
             let _ = Command::new("hyprctl")
                 .arg("dispatch")
                 .arg("resizewindowpixel")
@@ -45,90 +40,7 @@ pub fn apply_float_center_with_size(window_title: &str, width: i32, height: i32)
     });
 }
 
-/// Force a window to float using dispatch (for when window rules don't work)
-pub fn force_window_float_by_title(window_title: &str) {
-    let _ = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("togglefloating")
-        .arg(format!("title:({})", window_title))
-        .output();
-}
-
-/// Apply float rule only to a window by class
-pub fn apply_float_rule_by_class(window_class: &str) {
-    let class = window_class.to_string();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-
-        // Use new Hyprland 0.53.0 inline windowrule syntax
-        let rule = format!("float on, match:class {}", class);
-
-        let _ = Command::new("hyprctl")
-            .arg("keyword")
-            .arg("windowrule")
-            .arg(&rule)
-            .output();
-    });
-}
-
-/// Pin a window to all workspaces (workspace 0)
-pub fn pin_window(address: &str) -> Result<(), String> {
-    let output = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("pin")
-        .arg(format!("address:{}", address))
-        .output()
-        .map_err(|e| format!("Failed to execute hyprctl: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to pin window: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Unpin a window from all workspaces
-pub fn unpin_window(address: &str) -> Result<(), String> {
-    let output = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("pin")
-        .arg(format!("address:{}", address))
-        .output()
-        .map_err(|e| format!("Failed to execute hyprctl: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to unpin window: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Move a window to a specific workspace
-pub fn move_to_workspace(address: &str, workspace: &str) -> Result<(), String> {
-    let output = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("movetoworkspacesilent")
-        .arg(format!("{},address:{}", workspace, address))
-        .output()
-        .map_err(|e| format!("Failed to execute hyprctl: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to move window: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Get the address of a window by title
+/// Get the address of a window by title (used to enforce dialog size).
 pub fn get_window_address_by_title(title: &str) -> Option<String> {
     let output = Command::new("hyprctl")
         .arg("clients")
@@ -137,7 +49,6 @@ pub fn get_window_address_by_title(title: &str) -> Option<String> {
         .ok()?;
 
     let clients: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-
     for client in clients.as_array()? {
         if let Some(window_title) = client["title"].as_str() {
             if window_title == title {
@@ -145,44 +56,5 @@ pub fn get_window_address_by_title(title: &str) -> Option<String> {
             }
         }
     }
-
     None
-}
-
-/// Resize a window to exact dimensions
-pub fn resize_window_exact(address: &str, width: i32, height: i32) -> Result<(), String> {
-    let output = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("resizewindowpixel")
-        .arg(format!("exact {} {},address:{}", width, height, address))
-        .output()
-        .map_err(|e| format!("Failed to execute hyprctl: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Resize failed: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
-}
-
-/// Move a window to exact position
-pub fn move_window_exact(address: &str, x: i32, y: i32) -> Result<(), String> {
-    let output = Command::new("hyprctl")
-        .arg("dispatch")
-        .arg("movewindowpixel")
-        .arg(format!("exact {} {},address:{}", x, y, address))
-        .output()
-        .map_err(|e| format!("Failed to execute hyprctl: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Move failed: {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
 }

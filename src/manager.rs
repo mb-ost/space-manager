@@ -1,10 +1,33 @@
 use crate::types::ManagedWindow;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
+
+/// Atomically write `content` to `path` by writing to a sibling temp file,
+/// fsyncing, then renaming over the target (AF-6). A crash mid-write can never
+/// leave a partially written state/config file.
+async fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp_path = {
+        let mut os = path.as_os_str().to_owned();
+        os.push(".tmp");
+        PathBuf::from(os)
+    };
+    {
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(content).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+    }
+    tokio::fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WindowState {
@@ -223,7 +246,7 @@ impl SpaceManager {
         };
 
         let content = serde_json::to_string_pretty(&state)?;
-        tokio::fs::write(&self.state_file, content).await?;
+        atomic_write(&self.state_file, content.as_bytes()).await?;
 
         info!("Saved {} windows to state file", windows.len());
         Ok(())
@@ -249,7 +272,7 @@ impl SpaceManager {
         };
 
         let content = serde_json::to_string_pretty(&config)?;
-        tokio::fs::write(&self.config_file, content).await?;
+        atomic_write(&self.config_file, content.as_bytes()).await?;
 
         info!("Saved configuration to config file");
         Ok(())
@@ -388,6 +411,15 @@ impl SpaceManager {
         }
     }
 
+    /// Mark a window as closed by its stable id (used by resync re-match).
+    pub async fn mark_window_closed_by_id(&self, id: &str) {
+        let mut windows = self.windows.write().await;
+        if let Some(window) = windows.iter_mut().find(|w| w.id == id) {
+            window.close();
+            info!("Marked window '{}' as closed (by id {})", window.spawn_command, id);
+        }
+    }
+
     /// Remove a window at a specific index
     pub async fn remove_window_at_index(&self, index: usize) -> Option<String> {
         let mut windows = self.windows.write().await;
@@ -496,12 +528,8 @@ impl SpaceManager {
     pub async fn current_window(&self) -> Option<ManagedWindow> {
         let windows = self.windows.read().await;
         let current = self.current_index.read().await;
-
-        if windows.is_empty() {
-            None
-        } else {
-            Some(windows[*current].clone())
-        }
+        // Bounds-safe: never index a stale current against a mutated list (AF-6).
+        windows.get(*current).cloned()
     }
 
     pub async fn get_windows(&self) -> Vec<ManagedWindow> {
@@ -575,5 +603,185 @@ impl SpaceManager {
 impl Default for SpaceManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ManagedWindow;
+
+    fn mgr_with(n: usize) -> SpaceManager {
+        let m = SpaceManager::new();
+        // Populate synchronously via the async API on the current runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for _ in 0..n {
+                m.add_window(ManagedWindow::new("cmd".to_string())).await;
+            }
+        });
+        m
+    }
+
+    // ---- index invariants ----
+
+    #[tokio::test]
+    async fn test_current_window_empty_returns_none() {
+        let m = SpaceManager::new();
+        assert!(m.current_window().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_at_shifts_current_down() {
+        let m = SpaceManager::new();
+        for _ in 0..4 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(2).await;
+        m.remove_window_at_index(0).await;
+        assert_eq!(m.get_current_index().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_last_clamps_current() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(2).await; // current == tail
+        m.remove_window_at_index(2).await;
+        assert_eq!(m.get_current_index().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_insert_before_current_increments() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(1).await;
+        m.insert_window_at(0, ManagedWindow::new("new".into())).await;
+        assert_eq!(m.get_current_index().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_swap_updates_current() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(0).await;
+        m.swap_windows(0, 2).await.unwrap();
+        assert_eq!(m.get_current_index().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_next_wraps() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(2).await;
+        m.next().await;
+        assert_eq!(m.get_current_index().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_prev_wraps() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(0).await;
+        m.prev().await;
+        assert_eq!(m.get_current_index().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_switch_to_out_of_range() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        m.switch_to(1).await;
+        assert!(m.switch_to(9).await.is_none());
+        assert_eq!(m.get_current_index().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_out_of_range() {
+        let m = SpaceManager::new();
+        for _ in 0..3 {
+            m.add_window(ManagedWindow::new("c".into())).await;
+        }
+        assert!(m.remove_window_at_index(9).await.is_none());
+    }
+
+    // Keep the sync helper referenced so it doesn't warn if unused elsewhere.
+    #[test]
+    fn test_mgr_with_builds() {
+        let m = mgr_with(2);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(rt.block_on(m.window_count()), 2);
+    }
+
+    // ---- config serde defaults ----
+
+    #[test]
+    fn test_config_defaults_when_empty_object() {
+        let cfg: ConfigFile = serde_json::from_str("{}").unwrap();
+        assert!(cfg.side_mouse_binds);
+        assert!(cfg.overlay.enabled);
+        assert_eq!(cfg.overlay.from_area, "left");
+        assert_eq!(cfg.overlay.from_overlay, "bot_left");
+    }
+
+    #[test]
+    fn test_config_partial_overlay_fills_defaults() {
+        let json = r#"{
+            "overlay": {
+                "enabled": true,
+                "from_overlay": "top_right",
+                "offset_x": 8,
+                "offset_y": 26,
+                "change_area_fraction": 0.125,
+                "min_change_area_px": 250
+            }
+        }"#;
+        let cfg: ConfigFile = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.overlay.from_area, "left"); // default filled
+        assert_eq!(cfg.overlay.from_overlay, "top_right");
+        assert_eq!(cfg.overlay.overlay_size, "change_area_x"); // default filled
+    }
+
+    #[test]
+    fn test_config_preserves_templates() {
+        let json = r#"{
+            "templates": [
+                {"name": "Web", "command": "brave"},
+                {"name": "Dev", "command": "code"}
+            ]
+        }"#;
+        let cfg: ConfigFile = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.templates.len(), 2);
+        assert_eq!(cfg.templates[0].name, "Web");
+        assert_eq!(cfg.templates[1].command, "code");
+    }
+
+    #[test]
+    fn test_config_rejects_malformed() {
+        let result: Result<ConfigFile, _> = serde_json::from_str("{ not valid json ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_tolerates_unknown_fields() {
+        let json = r#"{ "future_feature": 42, "side_mouse_binds": false }"#;
+        let cfg: ConfigFile = serde_json::from_str(json).unwrap();
+        assert!(!cfg.side_mouse_binds);
     }
 }

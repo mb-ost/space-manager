@@ -33,13 +33,13 @@ Start it on-demand with a keybind, and it intelligently handles whether to launc
 ### Runtime Dependencies
 ```bash
 # Arch Linux
-sudo pacman -S hyprland gtk4 libevdev
+sudo pacman -S hyprland gtk4 gtk4-layer-shell libevdev
 
 # Ubuntu/Debian
-sudo apt install hyprland libgtk-4-1 libevdev2
+sudo apt install hyprland libgtk-4-1 libgtk4-layer-shell0 libevdev2
 
 # Fedora
-sudo dnf install hyprland gtk4 libevdev
+sudo dnf install hyprland gtk4 gtk4-layer-shell libevdev
 ```
 
 ### Required Permissions
@@ -75,13 +75,8 @@ cd spaceManager
 # Build the project
 cargo build --release
 
-# Install binaries
-sudo cp target/release/space-manager /usr/local/bin/
-sudo cp target/release/spacectl /usr/local/bin/
-
-# Make them executable
-sudo chmod +x /usr/local/bin/space-manager
-sudo chmod +x /usr/local/bin/spacectl
+# Install binaries (copies and sets permissions in one step)
+sudo install -m755 target/release/space-manager target/release/spacectl /usr/local/bin/
 ```
 
 ### Starting Space Manager
@@ -299,29 +294,34 @@ Then spawn with:
 ### Components
 
 - **space-manager**: Long-running daemon
-  - Listens to Hyprland IPC events (window open/close/workspace change)
+  - Listens to Hyprland IPC events via a reconnecting async listener (window open/close, workspace and monitor changes)
+  - Recovers automatically from monitor sleep/wake and DP link loss: monitor add/remove events, an event-socket reconnect supervisor, and a periodic consistency check all trigger a state resync
   - Manages ordered list of spaces and tracks current index
-  - Handles focus switching with Hyprland's `focuswindow` dispatch
+  - All Hyprland access goes through a typed async IPC layer (`src/hypr/`) — no `hyprctl` subprocesses in hot paths
   - Provides Unix socket IPC server for CLI commands
   - Monitors input devices for mouse button events
-  - Manages GTK4 overlay window lifecycle
+  - Logs to `~/.space-manager/logs/` with daily rotation (`RUST_LOG` controls verbosity)
 
 - **spacectl**: CLI tool
-  - Sends commands to daemon via Unix socket (`/tmp/space-manager.sock`)
+  - Sends commands to daemon via Unix socket (`$XDG_RUNTIME_DIR/space-manager.sock`)
   - Parses command-line arguments and formats IPC messages
 
 - **GTK4 Overlay**
-  - Layer-shell window pinned to all workspaces
-  - Hides when target window moves to different workspace
-  - Shows/hides based on window visibility
-  - Interactive controls for space management
+  - True wlr-layer-shell surface (namespace `space-manager-overlay`) on the overlay layer — not a regular window, so it survives workspace switches and monitor sleep/wake without repositioning hacks
+  - Anchored to the configured corner of the tracked window via monitor-local margins
+  - Driven by a typed message channel from the daemon (single GTK thread, started once)
+  - Interactive controls for space management; close button shuts the daemon down gracefully via IPC
 
 ### Key Files
 
-- `src/bin/daemon.rs`: Main daemon entry point
+- `src/bin/daemon.rs`: Thin daemon entry point
 - `src/bin/cli.rs`: CLI tool entry point
-- `src/manager.rs`: Core SpaceManager logic
-- `src/overlay/`: GTK4 overlay implementation
+- `src/daemon/`: Daemon logic — events + reconnect supervisor, recovery/resync, window rematching, command dispatch, visibility, lifecycle
+- `src/hypr/`: Typed async Hyprland IPC wrappers (single access layer)
+- `src/manager.rs`: Core SpaceManager state
+- `src/overlay/`: Layer-shell bar, spaces model, settings and template dialogs
+- `src/geometry.rs`: Pure geometry (edge zones, overlay anchoring)
+- `src/logging.rs`: File logging and panic hook
 - `src/input.rs`: Mouse button event monitoring
 - `src/ipc.rs`: IPC server/client
 - `src/process.rs`: Process spawning and window matching
@@ -343,8 +343,8 @@ Then spawn with:
 
 3. Check the daemon is detecting your mouse:
    ```bash
-   # Look for "Found mouse device" in logs
-   journalctl -f | grep space-manager
+   # Look for "Found mouse device" in the daemon log
+   grep "mouse device" ~/.space-manager/logs/space-manager.log.*
    ```
 
 4. Try disabling `side_mouse_binds` and using keyboard shortcuts instead
@@ -356,14 +356,19 @@ Then spawn with:
    cat ~/.space-manager/config.json | grep enabled
    ```
 
-2. Verify GTK4 is installed:
+2. Verify GTK4 and the layer-shell library are installed:
    ```bash
-   pkg-config --modversion gtk4
+   pkg-config --modversion gtk4 gtk4-layer-shell-0
    ```
 
-3. Check daemon logs for GTK errors:
+3. Verify the layer surface exists:
    ```bash
-   journalctl -u space-manager
+   hyprctl layers | grep space-manager-overlay
+   ```
+
+4. Check daemon logs for GTK errors:
+   ```bash
+   tail -f ~/.space-manager/logs/space-manager.log.*
    ```
 
 ### Windows not spawning

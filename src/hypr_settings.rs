@@ -1,102 +1,119 @@
-use std::sync::{Mutex, OnceLock};
+//! `follow_mouse` suppression for managed-window moves (OQ-2).
+//!
+//! Focus-follows-mouse can steal focus while managed browser windows are shuffled
+//! between workspaces during rapid switching. [`FollowMouseGuard`] temporarily sets
+//! `input:follow_mouse` to 0 and restores it, going through the typed `hypr`
+//! layer (no blocking subprocess, AF-4).
+//!
+//! The overlay no longer uses this at all (it is a layer-shell surface, not a
+//! Hyprland client, so its moves never touch focus). It is scoped strictly to
+//! `visibility::update_visibility`.
+//!
+//! Restoration must survive task cancellation: the suppressed section contains
+//! await points, and a cancelled future never reaches an explicit restore call.
+//! The guard therefore restores from `Drop` (by spawning onto the current
+//! runtime), and the stashed original is also mirrored in a global so
+//! [`force_restore`] can undo a live suppression during daemon shutdown.
 
-use tracing::{error, info};
+use std::sync::Mutex;
 
-#[derive(Debug, Default)]
-struct FollowMouseState {
-    depth: usize,
-    original_value: Option<i64>,
+use tracing::{info, warn};
+
+const FOLLOW_MOUSE_KEY: &str = "input:follow_mouse";
+
+/// Original `follow_mouse` value while a suppression is live, `None` otherwise.
+/// `update_visibility` is serialized by `visibility_lock`, so at most one
+/// suppression exists at a time.
+static SUPPRESSED_ORIGINAL: Mutex<Option<i64>> = Mutex::new(None);
+
+fn stash(original: Option<i64>) {
+    *SUPPRESSED_ORIGINAL.lock().unwrap_or_else(|p| p.into_inner()) = original;
 }
 
-fn get_follow_mouse_state() -> &'static Mutex<FollowMouseState> {
-    static FOLLOW_MOUSE_STATE: OnceLock<Mutex<FollowMouseState>> = OnceLock::new();
-    FOLLOW_MOUSE_STATE.get_or_init(|| Mutex::new(FollowMouseState::default()))
+fn take_stash() -> Option<i64> {
+    SUPPRESSED_ORIGINAL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
 }
 
-fn get_follow_mouse_setting() -> i64 {
-    std::process::Command::new("hyprctl")
-        .arg("getoption")
-        .arg("input:follow_mouse")
-        .arg("-j")
-        .output()
-        .ok()
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|json| json["int"].as_i64())
-        .unwrap_or(1)
+async fn set_follow_mouse(value: i64) {
+    if let Err(e) = crate::hypr::keyword_set(FOLLOW_MOUSE_KEY, &value.to_string()).await {
+        warn!("Failed to set follow_mouse to {}: {}", value, e);
+    } else {
+        info!("Restored follow_mouse to {}", value);
+    }
 }
 
-fn set_follow_mouse(value: i64) {
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("input:follow_mouse")
-        .arg(format!("{}", value))
-        .output();
-    info!("Set follow_mouse to: {}", value);
-}
-
+/// RAII suppression of focus-follows-mouse.
+///
+/// Restore happens on [`FollowMouseGuard::restore`] or, if the owning future is
+/// cancelled/dropped first, from `Drop` via a task spawned on the current
+/// runtime. Prefer calling `restore()` explicitly so the value is back before
+/// the caller continues.
 pub struct FollowMouseGuard {
-    active: bool,
+    original: Option<i64>,
 }
 
 impl FollowMouseGuard {
-    pub fn suppress() -> Self {
-        let state = get_follow_mouse_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("follow_mouse state mutex was poisoned, recovering");
-                poisoned.into_inner()
+    /// Read and stash the current `follow_mouse` value, then set it to 0.
+    ///
+    /// If the option cannot be read, nothing is changed and the guard is inert.
+    pub async fn suppress() -> Self {
+        match crate::hypr::get_option_int(FOLLOW_MOUSE_KEY).await {
+            Ok(original) => {
+                if let Err(e) = crate::hypr::keyword_set(FOLLOW_MOUSE_KEY, "0").await {
+                    warn!("Failed to suppress follow_mouse: {}", e);
+                    return Self { original: None };
+                }
+                info!("Suppressed follow_mouse (was {})", original);
+                stash(Some(original));
+                Self {
+                    original: Some(original),
+                }
             }
-        };
-
-        if state.depth == 0 {
-            let original_value = get_follow_mouse_setting();
-            state.original_value = Some(original_value);
-            set_follow_mouse(0);
-            info!("Captured follow_mouse original value: {}", original_value);
+            Err(e) => {
+                warn!("Failed to read follow_mouse, not suppressing: {}", e);
+                Self { original: None }
+            }
         }
+    }
 
-        state.depth += 1;
-        info!(
-            "follow_mouse suppression depth increased to {}",
-            state.depth
-        );
-
-        Self { active: true }
+    /// Explicitly restore the original value (the normal path).
+    pub async fn restore(mut self) {
+        if let Some(value) = self.original.take() {
+            take_stash();
+            set_follow_mouse(value).await;
+        }
     }
 }
 
 impl Drop for FollowMouseGuard {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-
-        let state = get_follow_mouse_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("follow_mouse state mutex was poisoned during drop, recovering");
-                poisoned.into_inner()
-            }
-        };
-
-        if state.depth == 0 {
-            error!("follow_mouse suppression depth underflow");
-            return;
-        }
-
-        state.depth -= 1;
-        info!(
-            "follow_mouse suppression depth decreased to {}",
-            state.depth
-        );
-
-        if state.depth == 0 {
-            if let Some(original_value) = state.original_value.take() {
-                set_follow_mouse(original_value);
-                info!("Restored follow_mouse to: {}", original_value);
+        // Only reached when the owning future was cancelled or dropped early —
+        // the explicit restore() path clears `original` first.
+        if let Some(value) = self.original.take() {
+            take_stash();
+            warn!("FollowMouseGuard dropped without restore (cancelled?); restoring async");
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(set_follow_mouse(value));
+            } else {
+                // No runtime (process teardown): best-effort blocking fallback.
+                // Documented exception to the no-subprocess rule (AF-4).
+                let _ = std::process::Command::new("hyprctl")
+                    .args(["keyword", FOLLOW_MOUSE_KEY, &value.to_string()])
+                    .output();
             }
         }
+    }
+}
+
+/// Undo a live suppression, if any. Called during daemon shutdown so an
+/// in-flight `update_visibility` can never leave `follow_mouse` at 0 after the
+/// process exits.
+pub async fn force_restore() {
+    if let Some(value) = take_stash() {
+        warn!("Shutdown with follow_mouse still suppressed; restoring");
+        set_follow_mouse(value).await;
     }
 }
