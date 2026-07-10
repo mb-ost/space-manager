@@ -66,6 +66,10 @@ impl Daemon {
             }
         }
 
+        // An in-flight update_visibility may still hold a follow_mouse
+        // suppression; undo it so the setting never outlives the daemon.
+        crate::hypr_settings::force_restore().await;
+
         // Tell the GTK thread to quit.
         self.overlay.send(OverlayMsg::Shutdown);
 

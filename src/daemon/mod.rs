@@ -13,7 +13,7 @@ pub mod recovery;
 pub mod rematch;
 pub mod visibility;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -55,8 +55,10 @@ pub struct Daemon {
     pub resync_lock: Arc<Mutex<()>>,
     /// True if a trigger fired while a resync was in progress (schedules a re-run).
     pub resync_pending: Arc<AtomicBool>,
-    /// Debounce handle for Trigger A (monitor/config events).
-    pub resync_debounce: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Debounce generation for Trigger A (monitor/config events). Bumped per
+    /// trigger; a woken debounce task only runs resync if still the newest.
+    /// Never aborts tasks — see `recovery::schedule_resync`.
+    pub resync_generation: Arc<AtomicU64>,
     /// Geometry the last Reposition used (for the periodic drift check).
     pub last_reposition: Arc<RwLock<Option<RepositionState>>>,
 }
@@ -74,7 +76,7 @@ impl Daemon {
             overlay_visible: Arc::new(RwLock::new(false)),
             resync_lock: Arc::new(Mutex::new(())),
             resync_pending: Arc::new(AtomicBool::new(false)),
-            resync_debounce: Arc::new(RwLock::new(None)),
+            resync_generation: Arc::new(AtomicU64::new(0)),
             last_reposition: Arc::new(RwLock::new(None)),
         })
     }

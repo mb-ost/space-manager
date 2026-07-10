@@ -105,21 +105,27 @@ async fn do_resync(daemon: &Daemon) -> Result<()> {
     Ok(())
 }
 
-/// Trigger A: schedule a debounced resync (150ms). Cancels any pending debounce
-/// so a burst of monitor/config events collapses into ONE resync.
+/// Trigger A: schedule a debounced resync (150ms). A burst of monitor/config
+/// events collapses into ONE resync via a generation counter: each call bumps
+/// the generation, and a woken task only proceeds if it is still the newest.
+///
+/// Deliberately NOT implemented with `JoinHandle::abort()` — the task body runs
+/// `resync()`, which suppresses `follow_mouse` inside `update_visibility`, and
+/// aborting it mid-flight cancelled the future between suppress and restore,
+/// leaving focus-follows-mouse stuck off (the "hover focus randomly dies" bug).
 pub async fn schedule_resync(daemon: Arc<Daemon>) {
-    let mut timer = daemon.resync_debounce.write().await;
-    if let Some(handle) = timer.take() {
-        handle.abort();
-    }
+    let generation = daemon.resync_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let d = daemon.clone();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(DEBOUNCE_MS)).await;
+        if d.resync_generation.load(Ordering::SeqCst) != generation {
+            // A newer trigger superseded this one; let it do the work.
+            return;
+        }
         if let Err(e) = resync(&d).await {
             error!("debounced resync failed (will retry on next trigger): {}", e);
         }
     });
-    *timer = Some(handle);
 }
 
 /// Trigger C: spawn the 30s periodic consistency check (never exits).

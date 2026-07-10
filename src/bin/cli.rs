@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
         }
         "list" => Command::List,
         "cleanup" => Command::Cleanup,
+        "shutdown" => Command::Shutdown,
         _ => {
             eprintln!("Error: unknown command '{}'", args[1]);
             print_usage();
@@ -41,10 +42,12 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to send command")?;
 
-    let response = client
-        .recv_response()
-        .await
-        .context("Failed to receive response")?;
+    // The daemon exits while handling Shutdown, so a missing response is expected there.
+    let response = match client.recv_response().await {
+        Ok(r) => r,
+        Err(_) if matches!(command, Command::Shutdown) => Response::Ok,
+        Err(e) => return Err(e).context("Failed to receive response"),
+    };
 
     match response {
         Response::Ok => {
@@ -98,6 +101,7 @@ fn print_usage() {
     eprintln!("  spawn \"<cmd>\"     Spawn a new application instance");
     eprintln!("  list              List all managed windows");
     eprintln!("  cleanup           Close all hidden windows in special:spaces");
+    eprintln!("  shutdown          Gracefully stop the daemon (saves state, closes tracked windows)");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  spacectl next");

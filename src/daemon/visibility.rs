@@ -10,7 +10,7 @@ use tracing::{error, info};
 
 use super::Daemon;
 use crate::hypr::{self, WorkspaceTarget};
-use crate::hypr_settings;
+use crate::hypr_settings::FollowMouseGuard;
 
 /// Resolve the workspace where the next visible managed window should be shown.
 ///
@@ -53,7 +53,9 @@ impl Daemon {
         info!("Updating visibility: showing {}", target_address);
 
         // Suppress focus-follows-mouse for the duration of the moves (OQ-2).
-        let original_follow_mouse = hypr_settings::suppress_follow_mouse().await;
+        // RAII: if this future is cancelled at any await below, the guard's Drop
+        // still restores the setting (the "hover focus randomly dies" bug).
+        let follow_mouse_guard = FollowMouseGuard::suppress().await;
 
         let result: Result<i32> = async {
             let all_windows = self.manager.get_windows().await;
@@ -103,7 +105,7 @@ impl Daemon {
         }
         .await;
 
-        hypr_settings::restore_follow_mouse(original_follow_mouse).await;
+        follow_mouse_guard.restore().await;
 
         let target_workspace = result?;
         *self.current_workspace.write().await = Some(target_workspace);

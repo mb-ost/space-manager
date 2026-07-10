@@ -394,6 +394,14 @@ popover {
     padding: 0;
 }
 popover > contents { background-color: rgba(30, 30, 30, 0.95); padding: 0; }
+popover modelbutton {
+    background-color: transparent;
+    color: #e0e0e0;
+    border-radius: 0;
+    padding: 8px 16px;
+    min-width: 100px;
+}
+popover modelbutton:hover { background-color: rgba(255, 255, 255, 0.1); color: #ffffff; }
 button.context-menu-item {
     background-color: transparent;
     color: #e0e0e0;
