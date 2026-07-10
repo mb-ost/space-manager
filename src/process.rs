@@ -39,7 +39,7 @@ impl ProcessLauncher {
 
         let spawn_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let pending = PendingSpawn {
@@ -62,7 +62,7 @@ impl ProcessLauncher {
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         // Try to match by PID first (within last 10 seconds)
@@ -116,7 +116,7 @@ impl ProcessLauncher {
         let mut spawns = self.pending_spawns.write().await;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         spawns.retain(|s| now - s.spawn_time < 10);

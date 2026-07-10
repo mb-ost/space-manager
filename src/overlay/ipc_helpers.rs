@@ -108,6 +108,12 @@ pub fn reset_overlay_position() {
     send_command_async(serde_json::json!("ResetOverlayPosition"));
 }
 
+/// Ask the daemon to shut down gracefully (used by the overlay close button).
+pub fn shutdown_daemon() {
+    info!("Requesting daemon shutdown");
+    send_command_async(serde_json::json!("Shutdown"));
+}
+
 /// Get list of command templates
 pub fn get_templates<F>(callback: F)
 where
@@ -141,13 +147,7 @@ pub fn spawn_at(index: usize, command: String, icon: Option<String>) {
 pub fn get_templates_sync() -> Option<Value> {
     let cmd = serde_json::json!("GetTemplates");
     match send_command_with_response_sync(cmd) {
-        Ok(response) => {
-            if let Some(templates) = response.get("Templates") {
-                Some(templates.clone())
-            } else {
-                None
-            }
-        }
+        Ok(response) => response.get("Templates").cloned(),
         Err(e) => {
             error!("Failed to get templates: {}", e);
             None

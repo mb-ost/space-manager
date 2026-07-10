@@ -1,102 +1,47 @@
-use std::sync::{Mutex, OnceLock};
+//! `follow_mouse` suppression for managed-window moves (OQ-2).
+//!
+//! Focus-follows-mouse can steal focus while managed browser windows are shuffled
+//! between workspaces during rapid switching. These async helpers temporarily set
+//! `input:follow_mouse` to 0 and restore it afterwards, going through the typed
+//! `hypr` layer (no blocking subprocess, AF-4).
+//!
+//! The overlay no longer uses this at all (it is a layer-shell surface, not a
+//! Hyprland client, so its moves never touch focus). It is scoped strictly to
+//! `visibility::update_visibility`.
 
-use tracing::{error, info};
+use tracing::{info, warn};
 
-#[derive(Debug, Default)]
-struct FollowMouseState {
-    depth: usize,
-    original_value: Option<i64>,
-}
+const FOLLOW_MOUSE_KEY: &str = "input:follow_mouse";
 
-fn get_follow_mouse_state() -> &'static Mutex<FollowMouseState> {
-    static FOLLOW_MOUSE_STATE: OnceLock<Mutex<FollowMouseState>> = OnceLock::new();
-    FOLLOW_MOUSE_STATE.get_or_init(|| Mutex::new(FollowMouseState::default()))
-}
-
-fn get_follow_mouse_setting() -> i64 {
-    std::process::Command::new("hyprctl")
-        .arg("getoption")
-        .arg("input:follow_mouse")
-        .arg("-j")
-        .output()
-        .ok()
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|json| json["int"].as_i64())
-        .unwrap_or(1)
-}
-
-fn set_follow_mouse(value: i64) {
-    let _ = std::process::Command::new("hyprctl")
-        .arg("keyword")
-        .arg("input:follow_mouse")
-        .arg(format!("{}", value))
-        .output();
-    info!("Set follow_mouse to: {}", value);
-}
-
-pub struct FollowMouseGuard {
-    active: bool,
-}
-
-impl FollowMouseGuard {
-    pub fn suppress() -> Self {
-        let state = get_follow_mouse_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("follow_mouse state mutex was poisoned, recovering");
-                poisoned.into_inner()
+/// Read and stash the current `follow_mouse` value, then set it to 0.
+///
+/// Returns the original value so the caller can restore it. Returns `None` if the
+/// option could not be read (in which case nothing is changed and restore is a
+/// no-op).
+pub async fn suppress_follow_mouse() -> Option<i64> {
+    match crate::hypr::get_option_int(FOLLOW_MOUSE_KEY).await {
+        Ok(original) => {
+            if let Err(e) = crate::hypr::keyword_set(FOLLOW_MOUSE_KEY, "0").await {
+                warn!("Failed to suppress follow_mouse: {}", e);
+                return None;
             }
-        };
-
-        if state.depth == 0 {
-            let original_value = get_follow_mouse_setting();
-            state.original_value = Some(original_value);
-            set_follow_mouse(0);
-            info!("Captured follow_mouse original value: {}", original_value);
+            info!("Suppressed follow_mouse (was {})", original);
+            Some(original)
         }
-
-        state.depth += 1;
-        info!(
-            "follow_mouse suppression depth increased to {}",
-            state.depth
-        );
-
-        Self { active: true }
+        Err(e) => {
+            warn!("Failed to read follow_mouse, not suppressing: {}", e);
+            None
+        }
     }
 }
 
-impl Drop for FollowMouseGuard {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-
-        let state = get_follow_mouse_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("follow_mouse state mutex was poisoned during drop, recovering");
-                poisoned.into_inner()
-            }
-        };
-
-        if state.depth == 0 {
-            error!("follow_mouse suppression depth underflow");
-            return;
-        }
-
-        state.depth -= 1;
-        info!(
-            "follow_mouse suppression depth decreased to {}",
-            state.depth
-        );
-
-        if state.depth == 0 {
-            if let Some(original_value) = state.original_value.take() {
-                set_follow_mouse(original_value);
-                info!("Restored follow_mouse to: {}", original_value);
-            }
+/// Restore `follow_mouse` to a previously stashed value (no-op on `None`).
+pub async fn restore_follow_mouse(original: Option<i64>) {
+    if let Some(value) = original {
+        if let Err(e) = crate::hypr::keyword_set(FOLLOW_MOUSE_KEY, &value.to_string()).await {
+            warn!("Failed to restore follow_mouse to {}: {}", value, e);
+        } else {
+            info!("Restored follow_mouse to {}", value);
         }
     }
 }

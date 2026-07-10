@@ -1,6 +1,10 @@
+pub mod daemon;
+pub mod geometry;
+pub mod hypr;
 pub mod hypr_settings;
 pub mod input;
 pub mod ipc;
+pub mod logging;
 pub mod manager;
 pub mod overlay;
 pub mod process;
