@@ -23,7 +23,7 @@ use super::ipc_helpers;
 use super::settings_dialog;
 use super::template_dialogs;
 use super::ui_components;
-use crate::geometry::{Anchor, OVERLAY_HEIGHT};
+use crate::geometry::{Anchor, Rect, OVERLAY_HEIGHT};
 use crate::overlay::model::SpaceButton;
 
 const APP_ID: &str = "com.spacermanager.overlay";
@@ -45,6 +45,10 @@ pub enum OverlayMsg {
         margin_y: i32,
         width: i32,
         monitor: String,
+        monitor_x: i32,
+        monitor_y: i32,
+        monitor_width: i32,
+        monitor_height: i32,
     },
     /// Make the bar visible.
     Show,
@@ -119,6 +123,44 @@ fn build_overlay(app: &Application, rx: async_channel::Receiver<OverlayMsg>) {
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Bottom, true);
 
+    // The compositor closes the layer surface when its output is destroyed
+    // (DP sleep/unplug). Never let that destroy the window — hide it instead;
+    // the daemon's resync re-pins and re-shows it. (Our app.quit() on Shutdown
+    // is unaffected by stopping the close request.)
+    window.connect_close_request(|w| {
+        warn!("Layer surface close requested (output gone?); hiding instead of destroying");
+        w.set_visible(false);
+        glib::Propagation::Stop
+    });
+
+    // Mitigation for a GDK-Wayland teardown crash (SIGSEGV observed 2026-07-11,
+    // core 6205): a mapped layer surface pinned to a monitor that gets removed
+    // can be freed out from under GDK's output handling. Detach and hide the
+    // surface as soon as GDK drops the monitor from its model.
+    if let Some(display) = gtk4::gdk::Display::default() {
+        let monitors = display.monitors();
+        let window_guard = window.clone();
+        monitors.connect_items_changed(move |model, _pos, removed, _added| {
+            if removed == 0 {
+                return;
+            }
+            let Some(current) = window_guard.monitor() else {
+                return; // not pinned to a specific monitor -> nothing to detach
+            };
+            let still_present = (0..model.n_items()).any(|i| {
+                model
+                    .item(i)
+                    .and_then(|o| o.downcast::<gtk4::gdk::Monitor>().ok())
+                    .is_some_and(|m| m == current)
+            });
+            if !still_present {
+                warn!("Overlay monitor removed; detaching surface and hiding");
+                window_guard.set_visible(false);
+                window_guard.set_monitor(None::<&gtk4::gdk::Monitor>);
+            }
+        });
+    }
+
     apply_css(&window);
 
     // --- widget tree ---
@@ -172,9 +214,8 @@ fn build_overlay(app: &Application, rx: async_channel::Receiver<OverlayMsg>) {
     hbox.append(&close_button);
     window.set_child(Some(&hbox));
 
-    // Map the surface, then start hidden until the daemon sends Show.
-    window.present();
-    window.set_visible(false);
+    // Leave the surface unmapped until the daemon sends Show. Mapping and
+    // immediately unmapping here can prevent gtk4-layer-shell from remapping it.
 
     // Track the current button count for auto-scroll.
     let total_spaces = Rc::new(RefCell::new(0usize));
@@ -205,11 +246,24 @@ fn build_overlay(app: &Application, rx: async_channel::Receiver<OverlayMsg>) {
                     margin_y,
                     width,
                     monitor,
+                    monitor_x,
+                    monitor_y,
+                    monitor_width,
+                    monitor_height,
                 } => {
-                    apply_reposition(&window_rx, anchor, margin_x, margin_y, width, &monitor);
+                    apply_reposition(
+                        &window_rx,
+                        anchor,
+                        margin_x,
+                        margin_y,
+                        width,
+                        &monitor,
+                        Rect::new(monitor_x, monitor_y, monitor_width, monitor_height),
+                    );
                 }
                 OverlayMsg::Show => {
                     window_rx.set_visible(true);
+                    window_rx.present();
                 }
                 OverlayMsg::Hide => {
                     window_rx.set_visible(false);
@@ -291,10 +345,18 @@ fn apply_reposition(
     margin_y: i32,
     width: i32,
     monitor: &str,
+    monitor_rect: Rect,
 ) {
-    // Best-effort: pin the surface to the monitor holding the tracked window so
-    // monitor-local margins land on the right output (multi-monitor).
-    set_monitor_by_name(window, monitor);
+    // Re-assert layer-shell properties in case the surface was remapped after
+    // an output drop (DP sleep / unplug).
+    window.set_layer(Layer::Overlay);
+    window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::None);
+    window.set_namespace(Some(NAMESPACE));
+    window.set_exclusive_zone(0);
+
+    // Pin to the monitor holding the tracked window so monitor-local margins
+    // land on the right output (multi-monitor).
+    pin_overlay_monitor(window, monitor, monitor_rect);
 
     // Reset all anchors, then set the two for this corner.
     for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
@@ -317,24 +379,49 @@ fn apply_reposition(
     window.set_height_request(OVERLAY_HEIGHT);
 }
 
-fn set_monitor_by_name(window: &ApplicationWindow, monitor: &str) {
-    if monitor.is_empty() {
-        return;
-    }
+fn pin_overlay_monitor(window: &ApplicationWindow, monitor: &str, monitor_rect: Rect) {
     let Some(display) = gtk4::gdk::Display::default() else {
         return;
     };
     let monitors = display.monitors();
+
+    // Prefer Hyprland output name ↔ GDK connector (DP-3, HDMI-A-1, …).
+    if !monitor.is_empty() {
+        for i in 0..monitors.n_items() {
+            if let Some(obj) = monitors.item(i) {
+                if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
+                    if mon.connector().as_deref() == Some(monitor) {
+                        window.set_monitor(Some(&mon));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: match global geometry. Connector names can lag after a DP
+    // wake, while the pixel rectangle from hyprctl monitors is already right.
     for i in 0..monitors.n_items() {
         if let Some(obj) = monitors.item(i) {
             if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
-                if mon.connector().as_deref() == Some(monitor) {
+                let g = mon.geometry();
+                if g.x() == monitor_rect.x
+                    && g.y() == monitor_rect.y
+                    && g.width() == monitor_rect.width
+                    && g.height() == monitor_rect.height
+                {
                     window.set_monitor(Some(&mon));
                     return;
                 }
             }
         }
     }
+
+    warn!(
+        "Monitor '{}' ({},{} {}x{}) not found in GDK model; detaching overlay from explicit monitor",
+        monitor, monitor_rect.x, monitor_rect.y, monitor_rect.width, monitor_rect.height
+    );
+    window.set_monitor(None::<&gtk4::gdk::Monitor>);
 }
 
 fn apply_css(window: &ApplicationWindow) {

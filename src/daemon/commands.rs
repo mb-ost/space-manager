@@ -165,6 +165,7 @@ impl Daemon {
                     }
                 }
             }
+            Command::CloseWindow(index) => self.handle_close_window(index).await,
             Command::CloseSpace(index) => self.handle_close_space(index).await,
             Command::Shutdown => {
                 info!("Received Shutdown command via IPC");
@@ -181,7 +182,7 @@ impl Daemon {
         }
     }
 
-    /// Shared Next/Prev switch logic (gated on focus + mouse edge zone).
+    /// Shared Next/Prev switch logic for explicit CLI/keybind requests.
     async fn handle_switch(&self, dir: SwitchDir) -> Response {
         let current_window = match self.manager.current_window().await {
             Some(w) if w.is_open() => w,
@@ -194,18 +195,6 @@ impl Daemon {
         if !self.is_window_active(&current_window.address).await {
             debug!("Current tracked window is not active, ignoring switch");
             return Response::Error("Tracked window not focused".to_string());
-        }
-
-        match self.check_mouse_position().await {
-            Ok(true) => {}
-            Ok(false) => {
-                debug!("Mouse not in edge zone, ignoring switch");
-                return Response::Error("Mouse not in edge zone of window".to_string());
-            }
-            Err(e) => {
-                error!("Failed to check mouse position: {}", e);
-                return Response::Error(format!("Failed to check mouse position: {}", e));
-            }
         }
 
         let window = match dir {
@@ -248,8 +237,28 @@ impl Daemon {
         }
     }
 
+    async fn handle_close_window(&self, index: usize) -> Response {
+        let windows = self.manager.get_windows().await;
+        let Some(window) = windows.get(index) else {
+            return Response::Error(format!("Invalid index: {}", index));
+        };
+
+        if !window.is_open() {
+            return Response::Ok;
+        }
+
+        info!("Closing window at index {}: {}", index, window.address);
+        match hypr::close_window(&window.address).await {
+            Ok(()) => Response::Ok,
+            Err(e) => {
+                error!("Failed to close window {}: {}", window.address, e);
+                Response::Error(format!("Failed to close window: {}", e))
+            }
+        }
+    }
+
     async fn handle_close_space(&self, index: usize) -> Response {
-        info!("Closing space at index {}", index);
+        info!("Deleting space at index {}", index);
 
         let windows = self.manager.get_windows().await;
         if index >= windows.len() {
@@ -308,7 +317,10 @@ impl Daemon {
         let mut closed_count = 0;
         for client in clients.iter() {
             if client.workspace_name == "special:spaces" {
-                info!("Closing hidden window: {} ({})", client.title, client.address);
+                info!(
+                    "Closing hidden window: {} ({})",
+                    client.title, client.address
+                );
                 if let Err(e) = hypr::close_window(&client.address).await {
                     error!("Failed to close hidden window {}: {}", client.address, e);
                 }

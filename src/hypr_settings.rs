@@ -2,8 +2,7 @@
 //!
 //! Focus-follows-mouse can steal focus while managed browser windows are shuffled
 //! between workspaces during rapid switching. [`FollowMouseGuard`] temporarily sets
-//! `input:follow_mouse` to 0 and restores it, going through the typed `hypr`
-//! layer (no blocking subprocess, AF-4).
+//! `input.follow_mouse` to 0 and restores it via the `hypr` layer (`hl.config`).
 //!
 //! The overlay no longer uses this at all (it is a layer-shell surface, not a
 //! Hyprland client, so its moves never touch focus). It is scoped strictly to
@@ -14,12 +13,15 @@
 //! The guard therefore restores from `Drop` (by spawning onto the current
 //! runtime), and the stashed original is also mirrored in a global so
 //! [`force_restore`] can undo a live suppression during daemon shutdown.
+//!
+//! Writes go through `hl.config` (`hyprctl eval`). `hyprctl keyword` is rejected
+//! by the Lua config manager.
 
 use std::sync::Mutex;
 
 use tracing::{info, warn};
 
-const FOLLOW_MOUSE_KEY: &str = "input:follow_mouse";
+const FOLLOW_MOUSE_KEY: &str = "input.follow_mouse";
 
 /// Original `follow_mouse` value while a suppression is live, `None` otherwise.
 /// `update_visibility` is serialized by `visibility_lock`, so at most one
@@ -99,10 +101,8 @@ impl Drop for FollowMouseGuard {
                 handle.spawn(set_follow_mouse(value));
             } else {
                 // No runtime (process teardown): best-effort blocking fallback.
-                // Documented exception to the no-subprocess rule (AF-4).
-                let _ = std::process::Command::new("hyprctl")
-                    .args(["keyword", FOLLOW_MOUSE_KEY, &value.to_string()])
-                    .output();
+                let expr = format!("hl.config({{ input = {{ follow_mouse = {value} }} }})");
+                let _ = crate::hypr::run_hyprctl_blocking(&["eval", &expr]);
             }
         }
     }

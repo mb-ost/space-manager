@@ -61,7 +61,8 @@ fn attach_context_menu(space_button: &Button, context_index: usize, total_spaces
         add_move_left_item(&menu_box, &popover, context_index, total_spaces);
         add_move_right_item(&menu_box, &popover, context_index, total_spaces);
         add_change_icon_item(&menu_box, &popover, context_index);
-        add_close_space_item(&menu_box, &popover, context_index);
+        add_close_window_item(&menu_box, &popover, context_index);
+        add_delete_space_item(&menu_box, &popover, context_index);
 
         popover.set_child(Some(&menu_box));
         popover.popup();
@@ -138,21 +139,37 @@ fn add_change_icon_item(menu_box: &gtk4::Box, popover: &gtk4::Popover, context_i
     menu_box.append(&change_icon_btn);
 }
 
-/// Add "Close Space" menu item
-fn add_close_space_item(menu_box: &gtk4::Box, popover: &gtk4::Popover, context_index: usize) {
-    let close_space_btn = Button::with_label("✕ Close Space");
-    close_space_btn.add_css_class("context-menu-item");
-    close_space_btn.add_css_class("destructive-action");
-    close_space_btn.set_cursor_from_name(Some("pointer"));
+/// Add "Close Window" menu item
+fn add_close_window_item(menu_box: &gtk4::Box, popover: &gtk4::Popover, context_index: usize) {
+    let close_window_btn = Button::with_label("✕ Close Window");
+    close_window_btn.add_css_class("context-menu-item");
+    close_window_btn.set_cursor_from_name(Some("pointer"));
 
     let popover_clone = popover.clone();
-    close_space_btn.connect_clicked(move |_| {
-        info!("Close space clicked for index {}", context_index);
+    close_window_btn.connect_clicked(move |_| {
+        info!("Close window clicked for index {}", context_index);
+        popover_clone.popdown();
+        ipc_helpers::close_window(context_index);
+    });
+
+    menu_box.append(&close_window_btn);
+}
+
+/// Add "Delete Space" menu item
+fn add_delete_space_item(menu_box: &gtk4::Box, popover: &gtk4::Popover, context_index: usize) {
+    let delete_space_btn = Button::with_label("✕ Delete Space");
+    delete_space_btn.add_css_class("context-menu-item");
+    delete_space_btn.add_css_class("destructive-action");
+    delete_space_btn.set_cursor_from_name(Some("pointer"));
+
+    let popover_clone = popover.clone();
+    delete_space_btn.connect_clicked(move |_| {
+        info!("Delete space clicked for index {}", context_index);
         popover_clone.popdown();
         ipc_helpers::close_space(context_index);
     });
 
-    menu_box.append(&close_space_btn);
+    menu_box.append(&delete_space_btn);
 }
 
 /// Show dialog to change the icon for a space

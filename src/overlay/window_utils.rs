@@ -4,22 +4,22 @@
 //! GTK dialog windows, so they are deliberately out of scope for AF-4's "no
 //! blocking subprocess" rule (which targets the async daemon paths). The overlay
 //! itself is layer-shell and does not use anything here.
+//!
+//! Writes use Lua `hyprctl eval` / `dispatch` — hyprlang `keyword windowrule`
+//! and `dispatch resizewindowpixel` are rejected by Hyprland's Lua config manager.
 
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
+
+use crate::hypr;
 
 /// Apply float and center rules to a window by title.
 pub fn apply_float_center_rules(window_title: &str) {
     let title = window_title.to_string();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
-        let rule = format!("float on, center on, match:title {}", title);
-        let _ = Command::new("hyprctl")
-            .arg("keyword")
-            .arg("windowrule")
-            .arg(&rule)
-            .output();
+        let expr = hypr::lua_float_center_rule(&title);
+        let _ = hypr::run_hyprctl_blocking(&["eval", &expr]);
     });
 }
 
@@ -31,20 +31,16 @@ pub fn apply_float_center_with_size(window_title: &str, width: i32, height: i32)
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(200));
         if let Some(address) = get_window_address_by_title(&title) {
-            let _ = Command::new("hyprctl")
-                .arg("dispatch")
-                .arg("resizewindowpixel")
-                .arg(format!("exact {} {},address:{}", width, height, address))
-                .output();
+            let expr = hypr::lua_resize_window(&address, width, height);
+            let _ = hypr::run_hyprctl_blocking(&["dispatch", &expr]);
         }
     });
 }
 
 /// Get the address of a window by title (used to enforce dialog size).
 pub fn get_window_address_by_title(title: &str) -> Option<String> {
-    let output = Command::new("hyprctl")
-        .arg("clients")
-        .arg("-j")
+    let output = std::process::Command::new("hyprctl")
+        .args(["clients", "-j"])
         .output()
         .ok()?;
 

@@ -279,6 +279,10 @@ impl Daemon {
             margin_y,
             width,
             monitor: mon.name.clone(),
+            monitor_x: mon.x,
+            monitor_y: mon.y,
+            monitor_width: mon.width,
+            monitor_height: mon.height,
         });
 
         *self.last_reposition.write().await = Some(RepositionState {

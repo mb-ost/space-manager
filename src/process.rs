@@ -32,6 +32,12 @@ impl ProcessLauncher {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            // Detach into its own process group so a signal delivered to the
+            // daemon's group (e.g. terminal SIGINT) never reaches the browser.
+            // Graceful teardown always goes through Hyprland `closewindow`, and
+            // the systemd unit uses KillMode=process so a daemon stop/crash
+            // leaves the browser alive to flush its session cleanly.
+            .process_group(0)
             .spawn()
             .context("Failed to spawn process")?;
 

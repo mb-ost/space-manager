@@ -18,6 +18,13 @@ async fn main() -> Result<()> {
     let _log_guard = logging::init();
     info!("Starting Space Manager daemon");
 
+    // Single-instance guard: a second launch must not steal the IPC socket
+    // from a live daemon (the keybind may fire while one is already running).
+    if space_manager::ipc::daemon_already_running().await {
+        info!("Another space-manager daemon is already running; exiting");
+        return Ok(());
+    }
+
     // Start the single, long-lived GTK overlay thread and get its handle.
     let overlay = bar::start();
 

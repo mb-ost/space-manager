@@ -42,6 +42,17 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Result<T> {
     Ok(value)
 }
 
+/// True if a daemon is already serving the socket (single-instance guard: a
+/// second daemon must not steal the socket from a live one).
+pub async fn daemon_already_running() -> bool {
+    let socket_path = get_socket_path();
+    if !socket_path.exists() {
+        return false;
+    }
+    // Stale socket files (dead daemon) refuse connections; live ones accept.
+    UnixStream::connect(&socket_path).await.is_ok()
+}
+
 pub struct IpcServer {
     listener: UnixListener,
 }
@@ -145,6 +156,13 @@ mod tests {
         let frame = encode_frame(&Command::Next).unwrap();
         let decoded: Command = decode_frame(&frame).unwrap();
         assert!(matches!(decoded, Command::Next));
+    }
+
+    #[test]
+    fn test_frame_roundtrip_close_window() {
+        let frame = encode_frame(&Command::CloseWindow(2)).unwrap();
+        let decoded: Command = decode_frame(&frame).unwrap();
+        assert!(matches!(decoded, Command::CloseWindow(2)));
     }
 
     #[test]
