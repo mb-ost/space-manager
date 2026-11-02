@@ -90,7 +90,13 @@ pub fn set_window_icon(index: usize, icon: String) {
     send_command_async(serde_json::json!({"SetWindowIcon": [index, icon]}));
 }
 
-/// Close a space at the given index
+/// Close a window without deleting its space
+pub fn close_window(index: usize) {
+    info!("Closing window at index {}", index);
+    send_command_async(serde_json::json!({"CloseWindow": index}));
+}
+
+/// Delete a space at the given index
 pub fn close_space(index: usize) {
     info!("Closing space at index {}", index);
     send_command_async(serde_json::json!({"CloseSpace": index}));

@@ -75,6 +75,7 @@ pub enum Command {
     GetTemplates,                // Get list of command templates
     AddTemplate(String, String), // Add new template (name, command)
     RemoveTemplate(String),      // Remove template by name
+    CloseWindow(usize),          // Close window but keep the space at index
     CloseSpace(usize),           // Close window and remove space at index
     ResetOverlayPosition,        // Force reposition overlay to configured location
     Shutdown,                    // Gracefully shut down the daemon (sent by overlay close button)

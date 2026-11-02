@@ -1,6 +1,6 @@
 //! Hyprland event listening + reconnect supervision + input (AF-1/AF-3).
 //!
-//! The async `AsyncEventListener` (OQ-1) runs inside the single tokio runtime,
+//! The async event-socket reader (OQ-1) runs inside the single tokio runtime,
 //! wrapped in a supervisor task that never exits: it reconnects with exponential
 //! backoff (250ms -> x2 -> cap 5s, reset after a run > 30s) and runs `resync()`
 //! on every (re)connect. Monitor/config events feed the debounced resync
@@ -9,8 +9,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use hyprland::event_listener::AsyncEventListener;
+use anyhow::{bail, Result};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::UnixStream;
 use tracing::{debug, error, info, warn};
 
 use super::recovery;
@@ -50,7 +51,10 @@ pub fn spawn_supervisor(daemon: Arc<Daemon>) {
         loop {
             // Run resync on every (re)connect; a failure is logged, never fatal.
             if let Err(e) = recovery::resync(&daemon).await {
-                error!("resync failed (will retry on next trigger/reconnect): {}", e);
+                error!(
+                    "resync failed (will retry on next trigger/reconnect): {}",
+                    e
+                );
             }
 
             let started = Instant::now();
@@ -69,93 +73,75 @@ pub fn spawn_supervisor(daemon: Arc<Daemon>) {
     });
 }
 
-/// Build a fresh listener, register handlers, and block until the socket drops.
+#[derive(Debug, PartialEq, Eq)]
+enum HyprEvent {
+    WindowOpened(String),
+    WindowClosed(String),
+    WindowMoved(String),
+    WorkspaceChanged(i32),
+    Resync,
+}
+
+fn event_window_address(data: &str) -> Option<String> {
+    let address = data
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    if address.starts_with("0x") {
+        Some(address.to_string())
+    } else {
+        Some(format!("0x{address}"))
+    }
+}
+
+fn parse_event(line: &str) -> Option<HyprEvent> {
+    let (name, data) = line.split_once(">>")?;
+    let first_field = || {
+        data.split(',')
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+
+    match name {
+        "openwindow" => event_window_address(data).map(HyprEvent::WindowOpened),
+        "closewindow" => event_window_address(data).map(HyprEvent::WindowClosed),
+        "movewindowv2" => event_window_address(data).map(HyprEvent::WindowMoved),
+        "workspacev2" => first_field()
+            .and_then(|id| id.parse().ok())
+            .map(HyprEvent::WorkspaceChanged),
+        "monitoradded" | "monitoraddedv2" | "monitorremoved" | "monitorremovedv2"
+        | "configreloaded" | "focusedmon" | "focusedmonv2" | "moveworkspacev2" => {
+            Some(HyprEvent::Resync)
+        }
+        _ => None,
+    }
+}
+
+/// Read Hyprland's event socket until it closes. Unknown and unrelated events
+/// are ignored so additions to the IPC protocol cannot terminate the listener.
 async fn run_listener(daemon: Arc<Daemon>) -> Result<()> {
-    let mut listener = AsyncEventListener::new();
-
-    // ---- window/workspace tracking ----
-    {
-        let d = daemon.clone();
-        listener.add_window_opened_handler(move |data| {
-            let d = d.clone();
-            Box::pin(async move {
-                d.handle_window_open(data.window_address.to_string()).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_window_closed_handler(move |addr| {
-            let d = d.clone();
-            Box::pin(async move {
-                d.handle_window_close(addr.to_string()).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_window_moved_handler(move |data| {
-            let d = d.clone();
-            Box::pin(async move {
-                d.handle_window_moved(data.window_address.to_string()).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_workspace_changed_handler(move |data| {
-            let d = d.clone();
-            Box::pin(async move {
-                d.handle_workspace_change(data.id).await;
-            })
-        });
-    }
-
-    // ---- recovery triggers (Trigger A): monitor / layout / config events ----
-    {
-        let d = daemon.clone();
-        listener.add_monitor_added_handler(move |_data| {
-            let d = d.clone();
-            Box::pin(async move {
-                info!("monitoradded -> scheduling debounced resync");
-                recovery::schedule_resync(d).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_monitor_removed_handler(move |_name| {
-            let d = d.clone();
-            Box::pin(async move {
-                info!("monitorremoved -> scheduling debounced resync");
-                recovery::schedule_resync(d).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_config_reloaded_handler(move || {
-            let d = d.clone();
-            Box::pin(async move {
-                info!("configreloaded -> scheduling debounced resync");
-                recovery::schedule_resync(d).await;
-            })
-        });
-    }
-    {
-        let d = daemon.clone();
-        listener.add_active_monitor_changed_handler(move |_data| {
-            let d = d.clone();
-            Box::pin(async move {
-                debug!("activemonitorchanged -> scheduling debounced resync");
-                recovery::schedule_resync(d).await;
-            })
-        });
-    }
-
+    let path = hypr::event_socket_path()?;
+    let stream = UnixStream::connect(&path).await?;
+    let mut lines = BufReader::new(stream).lines();
     info!("Hyprland async event listener started");
-    listener.start_listener_async().await?;
-    Ok(())
+
+    while let Some(line) = lines.next_line().await? {
+        match parse_event(&line) {
+            Some(HyprEvent::WindowOpened(address)) => daemon.handle_window_open(address).await,
+            Some(HyprEvent::WindowClosed(address)) => daemon.handle_window_close(address).await,
+            Some(HyprEvent::WindowMoved(address)) => daemon.handle_window_moved(address).await,
+            Some(HyprEvent::WorkspaceChanged(id)) => daemon.handle_workspace_change(id).await,
+            Some(HyprEvent::Resync) => {
+                debug!("{} -> scheduling debounced resync", line);
+                recovery::schedule_resync(daemon.clone()).await;
+            }
+            None => debug!("Ignoring Hyprland event: {}", line),
+        }
+    }
+
+    bail!("Hyprland event socket closed")
 }
 
 impl Daemon {
@@ -183,7 +169,21 @@ impl Daemon {
             debug!("Side mouse binds disabled, ignoring button press");
             return;
         }
-        // Next/Prev already gate on focus + mouse position, so just dispatch.
+        let Some(current) = self.manager.current_window().await.filter(|w| w.is_open()) else {
+            return;
+        };
+        if !self.is_window_active(&current.address).await {
+            return;
+        }
+        match self.check_mouse_position().await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                error!("Failed to check mouse position: {}", e);
+                return;
+            }
+        }
+
         match button {
             MouseButton::Button4 => {
                 let _ = self.handle_command(Command::Prev).await;
@@ -218,10 +218,16 @@ impl Daemon {
         );
 
         let Some(pending) = self.launcher.match_window(&client.class, pid_value).await else {
-            info!("Window not matched - no pending spawn for class '{}'", client.class);
+            info!(
+                "Window not matched - no pending spawn for class '{}'",
+                client.class
+            );
             return;
         };
-        info!("Matched spawned window: {} ({})", client.title, client.class);
+        info!(
+            "Matched spawned window: {} ({})",
+            client.title, client.class
+        );
 
         let was_reopened = if let Some(ref window_id) = pending.window_id {
             self.manager
@@ -308,7 +314,10 @@ impl Daemon {
                     } else {
                         match self
                             .launcher
-                            .spawn(next_window.spawn_command.clone(), Some(next_window.id.clone()))
+                            .spawn(
+                                next_window.spawn_command.clone(),
+                                Some(next_window.id.clone()),
+                            )
                             .await
                         {
                             Ok(_) => info!("Spawned next window after close"),
@@ -381,11 +390,48 @@ impl Daemon {
                 info!("Showing overlay (window became visible)");
                 self.show_overlay().await;
             }
-            self.sync_current_workspace_from_current_window(&clients).await;
+            self.sync_current_workspace_from_current_window(&clients)
+                .await;
             self.update_overlay().await;
         } else if self.is_overlay_visible().await {
             info!("Hiding overlay (window not visible on any visible workspace)");
             self.hide_overlay().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::{parse_event, HyprEvent};
+
+    #[test]
+    fn parses_current_window_and_workspace_events() {
+        assert_eq!(
+            parse_event("openwindow>>560a497418f0,2,brave,title,with,commas"),
+            Some(HyprEvent::WindowOpened("0x560a497418f0".into()))
+        );
+        assert_eq!(
+            parse_event("closewindow>>560a497418f0"),
+            Some(HyprEvent::WindowClosed("0x560a497418f0".into()))
+        );
+        assert_eq!(
+            parse_event("movewindowv2>>0xabc,2,2"),
+            Some(HyprEvent::WindowMoved("0xabc".into()))
+        );
+        assert_eq!(
+            parse_event("workspacev2>>2,2"),
+            Some(HyprEvent::WorkspaceChanged(2))
+        );
+    }
+
+    #[test]
+    fn parses_monitor_events_and_ignores_new_unrelated_events() {
+        assert_eq!(
+            parse_event("monitoraddedv2>>1,DP-3,Samsung Odyssey"),
+            Some(HyprEvent::Resync)
+        );
+        assert_eq!(parse_event("destroyworkspacev2>>3,3,0x1234"), None);
+        assert_eq!(parse_event("somefutureevent>>anything"), None);
+        assert_eq!(parse_event("workspacev2>>not-an-id,name"), None);
     }
 }

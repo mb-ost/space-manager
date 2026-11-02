@@ -83,14 +83,21 @@ sudo install -m755 target/release/space-manager target/release/spacectl /usr/loc
 
 Space Manager is designed to start on-demand via a keybind, making it perfect for replacing your browser launcher or application shortcuts.
 
-Add to your `~/.config/hypr/hyprland.conf`:
+Add to your `~/.config/hypr/hyprland.lua` (or start the systemd user unit):
 
-```conf
-# Replace your browser keybind with space-manager
-bind = SUPER, B, exec, space-manager
+```lua
+-- Start space-manager if needed; switch to the next space on later presses.
+local browser = "sh -c 'systemctl --user is-active --quiet space-manager && \"$HOME/.local/bin/spacectl\" next || systemctl --user start space-manager'"
+hl.bind("SUPER + SHIFT + B", hl.dsp.exec_cmd(browser))
+```
 
-# Or use any keybind you prefer
-bind = SUPER, S, exec, space-manager
+Window movement talks to Hyprland's Lua dispatcher (`hl.dsp.window.move` / `close` / `focus`). The overlay is a `gtk4-layer-shell` surface (`namespace = space-manager-overlay`), not a regular client — do not float it with a window rule. A layer rule is enough:
+
+```lua
+hl.layer_rule({
+    match = { namespace = "space-manager-overlay" },
+    no_anim = true,
+})
 ```
 
 **Recommended Usage**: Replace your existing browser launcher keybind with `space-manager`. When you press the keybind:
@@ -167,7 +174,8 @@ The overlay appears at the bottom-left (by default) of your active window:
 - **Right-click on space**: Show context menu with:
   - Move Left/Right
   - Change Icon
-  - Close Window
+  - Close Window (keeps the space for lazy reopening)
+  - Delete Space (closes the window and removes the space)
 
 ### Mouse Bindings
 
